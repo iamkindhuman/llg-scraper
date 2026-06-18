@@ -1,30 +1,14 @@
 const express = require("express");
 const WebSocket = require("ws");
 
+const app = express();
 const PORT = process.env.PORT || 3000;
 
-const app = express();
-
-let latestQuotes = {};
 let connected = false;
-let lastMessages = [];
+let latestXAU = null;
+let lastUpdate = null;
 
-function addLog(msg) {
-    console.log(msg);
-
-    lastMessages.push({
-        time: new Date().toISOString(),
-        message: msg
-    });
-
-    if (lastMessages.length > 100) {
-        lastMessages.shift();
-    }
-}
-
-function connectWebSocket() {
-    addLog("Connecting to websocket...");
-
+function connect() {
     const ws = new WebSocket(
         "wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket",
         {
@@ -34,119 +18,75 @@ function connectWebSocket() {
 
     ws.on("open", () => {
         connected = true;
-        addLog("WebSocket connected");
 
-        // Try joining namespace
         setTimeout(() => {
-            try {
-                addLog("SEND: 40/bquote");
-                ws.send("40/bquote");
-            } catch (e) {
-                addLog("ERROR sending namespace connect: " + e.message);
-            }
+            ws.send("40/bquote");
         }, 1000);
     });
 
     ws.on("message", (data) => {
         const msg = data.toString();
 
-        addLog("RECV: " + msg);
-
-        // Engine.IO ping
+        // ping -> pong
         if (msg === "2") {
-            addLog("SEND: 3");
             ws.send("3");
             return;
         }
 
-        // Engine.IO open packet
-        if (msg.startsWith("0")) {
-            addLog("Engine.IO open received");
+        if (!msg.startsWith("42/bquote,")) {
             return;
         }
 
-        // Namespace connected
-        if (msg.startsWith("40/bquote")) {
-            addLog("Connected to /bquote namespace");
-            return;
-        }
+        try {
+            const packet = JSON.parse(
+                msg.substring("42/bquote,".length)
+            );
 
-        // Socket.IO event
-        if (msg.startsWith("42/bquote,")) {
-            try {
-                const payload = JSON.parse(
-                    msg.substring("42/bquote,".length)
-                );
-
-                const eventName = payload[0];
-                const eventData = payload[1];
-
-                addLog(`EVENT: ${eventName}`);
-
-                if (
-                    eventName === "quote.realtime" &&
-                    eventData &&
-                    eventData.products
-                ) {
-                    latestQuotes = eventData.products;
-
-                    addLog(
-                        `Quotes updated. Symbols=${Object.keys(latestQuotes).length}`
-                    );
-
-                    if (latestQuotes.XAU) {
-                        addLog(
-                            `XAU BUY=${latestQuotes.XAU.buy} SELL=${latestQuotes.XAU.sell}`
-                        );
-                    }
-                }
-            } catch (err) {
-                addLog("JSON PARSE ERROR: " + err.message);
+            if (packet[0] !== "quote.realtime") {
+                return;
             }
-        }
+
+            const products = packet[1]?.products;
+
+            if (!products) {
+                return;
+            }
+
+            // IMPORTANT: key is XAU=
+            if (products["XAU="]) {
+                latestXAU = products["XAU="];
+                lastUpdate = new Date().toISOString();
+            }
+
+        } catch (e) {}
     });
 
-    ws.on("error", (err) => {
-        addLog("WebSocket error: " + err.message);
-    });
-
-    ws.on("close", (code, reason) => {
+    ws.on("close", () => {
         connected = false;
-
-        addLog(
-            `WebSocket closed. Code=${code} Reason=${reason?.toString()}`
-        );
-
-        setTimeout(() => {
-            connectWebSocket();
-        }, 5000);
+        setTimeout(connect, 5000);
     });
+
+    ws.on("error", () => {});
 }
 
-connectWebSocket();
+connect();
 
 app.get("/", (req, res) => {
     res.json({
-        status: connected ? "connected" : "disconnected",
-        symbols: Object.keys(latestQuotes).length,
-        xau: latestQuotes?.XAU || null
+        connected,
+        lastUpdate,
+        xau: latestXAU
     });
 });
 
-app.get("/quotes", (req, res) => {
-    res.json(latestQuotes);
+app.get("/buy", (req, res) => {
+    res.send(latestXAU?.buy || "");
 });
 
-app.get("/quote/:symbol", (req, res) => {
-    const symbol = req.params.symbol;
-
-    res.json(latestQuotes[symbol] || {});
-});
-
-app.get("/debug", (req, res) => {
-    res.json(lastMessages);
+app.get("/sell", (req, res) => {
+    res.send(latestXAU?.sell || "");
 });
 
 app.listen(PORT, () => {
-    console.log(`Server running on ${PORT}`);
+    console.log(`Server started on ${PORT}`);
 });
