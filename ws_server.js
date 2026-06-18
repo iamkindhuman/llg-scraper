@@ -10,6 +10,7 @@ let currentPrice = null;
 let lastUpdate = 0;
 let wsConnection = null;
 let reconnectAttempts = 0;
+let allMessages = []; // Store all messages for inspection
 
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
@@ -21,20 +22,26 @@ function connectWebSocket() {
     ws.on('open', function open() {
         console.log('✅ WebSocket connected!');
         reconnectAttempts = 0;
-        
-        // Complete Socket.IO handshake with auth
-        // 40 = Socket.IO connection message with auth
-        const handshake = JSON.stringify({
-            token: 'applepieapplepieapplepieapplepie'
-        });
-        ws.send('40' + handshake);
-        console.log('📤 Sent Socket.IO handshake with auth:', handshake);
+        ws.send('40');
+        console.log('📤 Sent Socket.IO handshake (40)');
     });
     
     ws.on('message', function incoming(data) {
         try {
             const message = data.toString();
-            console.log('📨 Received:', message);
+            console.log('📨 RAW MESSAGE:', message);
+            
+            // Store for API access
+            allMessages.push({
+                timestamp: new Date().toISOString(),
+                raw: message,
+                type: getMessageType(message)
+            });
+            
+            // Keep only last 100 messages
+            if (allMessages.length > 100) {
+                allMessages.shift();
+            }
             
             // Socket.IO ping response
             if (message === '3') {
@@ -42,72 +49,30 @@ function connectWebSocket() {
                 return;
             }
             
-            // Socket.IO handshake acknowledgment with session
-            if (message.startsWith('40') && message.length > 2) {
-                console.log('✅ Handshake acknowledged with session');
+            // Socket.IO handshake acknowledgment
+            if (message === '40') {
+                console.log('✅ Handshake acknowledged');
+                ws.send('42["subscribe","LLG"]');
+                console.log('📤 Sent subscription for LLG');
                 return;
             }
             
-            // Check for price data (Socket.IO event format)
+            // Try to parse JSON data
             if (message.startsWith('42')) {
-                const jsonStr = message.substring(2);
-                const parsed = JSON.parse(jsonStr);
-                console.log('📊 Parsed data:', JSON.stringify(parsed));
-                
-                // Handle array format: ["eventName", data]
-                if (Array.isArray(parsed)) {
-                    const eventName = parsed[0];
-                    const eventData = parsed[1];
+                try {
+                    const jsonStr = message.substring(2);
+                    const parsed = JSON.parse(jsonStr);
+                    console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
                     
-                    // Look for price data
-                    if (eventName === 'price' || eventName === 'update' || eventName === 'data') {
-                        if (eventData && typeof eventData === 'object') {
-                            // Check for LLG in various formats
-                            if (eventData.product === 'LLG' && eventData.bid) {
-                                currentPrice = eventData.bid;
-                                lastUpdate = Date.now();
-                                console.log('💰 LLG Bid updated:', currentPrice);
-                            }
-                            // Check if LLG is nested
-                            if (eventData.LLG && eventData.LLG.bid) {
-                                currentPrice = eventData.LLG.bid;
-                                lastUpdate = Date.now();
-                                console.log('💰 LLG Bid updated:', currentPrice);
-                            }
-                            // Check for array of products
-                            if (Array.isArray(eventData)) {
-                                eventData.forEach(item => {
-                                    if (item && item.product === 'LLG' && item.bid) {
-                                        currentPrice = item.bid;
-                                        lastUpdate = Date.now();
-                                        console.log('💰 LLG Bid updated:', currentPrice);
-                                    }
-                                });
-                            }
-                            // Check all keys for LLG
-                            Object.keys(eventData).forEach(key => {
-                                if (key === 'LLG' || key === 'llg') {
-                                    if (eventData[key] && eventData[key].bid) {
-                                        currentPrice = eventData[key].bid;
-                                        lastUpdate = Date.now();
-                                        console.log('💰 LLG Bid updated:', currentPrice);
-                                    }
-                                }
-                            });
-                        }
-                    }
-                }
-                // Handle object format directly
-                else if (parsed && typeof parsed === 'object') {
-                    if (parsed.product === 'LLG' && parsed.bid) {
-                        currentPrice = parsed.bid;
-                        lastUpdate = Date.now();
-                        console.log('💰 LLG Bid updated:', currentPrice);
-                    }
+                    // Try to find LLG price in ANY format
+                    findLLGPrice(parsed);
+                } catch (e) {
+                    console.log('⚠️ Could not parse JSON:', e.message);
                 }
             }
+            
         } catch (e) {
-            console.log('⚠️ Error parsing message:', e.message);
+            console.log('⚠️ Error processing message:', e.message);
         }
     });
     
@@ -119,7 +84,6 @@ function connectWebSocket() {
         console.log(`🔌 WebSocket disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
         wsConnection = null;
         
-        // Exponential backoff reconnect
         const delay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
         console.log(`⏳ Reconnecting in ${delay/1000} seconds...`);
         setTimeout(() => {
@@ -133,6 +97,62 @@ function connectWebSocket() {
     wsConnection = ws;
 }
 
+function getMessageType(message) {
+    if (message === '3') return 'ping-response';
+    if (message === '40') return 'handshake-ack';
+    if (message.startsWith('0')) return 'handshake';
+    if (message.startsWith('42')) return 'event';
+    if (message.startsWith('2')) return 'ping';
+    return 'unknown';
+}
+
+function findLLGPrice(data) {
+    // Recursively search for LLG data
+    const searchLLG = (obj, path = '') => {
+        if (!obj || typeof obj !== 'object') return;
+        
+        // Check if this object has LLG or product info
+        if (obj.product === 'LLG' && obj.bid) {
+            currentPrice = obj.bid;
+            lastUpdate = Date.now();
+            console.log(`🎯 FOUND LLG at ${path}:`, obj);
+            console.log(`💰 LLG Bid: ${obj.bid}, Ask: ${obj.ask || 'N/A'}`);
+            return;
+        }
+        
+        // Check if any key is 'LLG' or 'llg'
+        Object.keys(obj).forEach(key => {
+            if (key === 'LLG' || key === 'llg') {
+                const value = obj[key];
+                if (value && typeof value === 'object') {
+                    if (value.bid) {
+                        currentPrice = value.bid;
+                        lastUpdate = Date.now();
+                        console.log(`🎯 FOUND LLG at ${path}.${key}:`, value);
+                        console.log(`💰 LLG Bid: ${value.bid}, Ask: ${value.ask || 'N/A'}`);
+                    }
+                }
+            }
+            
+            // Recursively search
+            if (typeof obj[key] === 'object' && obj[key] !== null) {
+                searchLLG(obj[key], `${path}.${key}`);
+            }
+        });
+        
+        // If obj is array, search each item
+        if (Array.isArray(obj)) {
+            obj.forEach((item, index) => {
+                if (typeof item === 'object' && item !== null) {
+                    searchLLG(item, `${path}[${index}]`);
+                }
+            });
+        }
+    };
+    
+    searchLLG(data);
+}
+
 // Keep connection alive with regular pings
 setInterval(() => {
     if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
@@ -141,29 +161,42 @@ setInterval(() => {
     }
 }, 15000);
 
+// API endpoint to see ALL raw messages
+app.get('/api/messages', (req, res) => {
+    res.json({
+        total: allMessages.length,
+        messages: allMessages
+    });
+});
+
+// API endpoint for latest LLG price
 app.get('/api/llg', (req, res) => {
     if (currentPrice) {
         res.json({
             bid: currentPrice,
             timestamp: lastUpdate,
             source: 'websocket',
-            connected: wsConnection && wsConnection.readyState === WebSocket.OPEN
+            connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
+            lastMessage: allMessages.length > 0 ? allMessages[allMessages.length - 1] : null
         });
     } else {
         res.status(503).json({
             error: 'No price data available yet',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
-            status: 'Waiting for data'
+            messagesReceived: allMessages.length,
+            lastMessage: allMessages.length > 0 ? allMessages[allMessages.length - 1] : null
         });
     }
 });
 
+// API endpoint for connection status
 app.get('/', (req, res) => {
     res.json({
         status: 'OK',
         connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
         price: currentPrice || 'Not fetched',
-        lastUpdate: lastUpdate ? new Date(lastUpdate).toISOString() : null
+        lastUpdate: lastUpdate ? new Date(lastUpdate).toISOString() : null,
+        messagesReceived: allMessages.length
     });
 });
 
