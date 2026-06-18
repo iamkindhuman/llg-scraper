@@ -1,16 +1,15 @@
 {
-  "name": "llg-scraper",
+  "name": "llg-websocket-scraper",
   "version": "1.0.0",
-  "description": "LLG price scraper",
-  "main": "server.js",
+  "description": "LLG price via WebSocket",
+  "main": "ws_server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node ws_server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "axios": "^1.6.0",
-    "cheerio": "^1.0.0-rc.12"
+    "ws": "^8.14.2"
   },
   "engines": {
     "node": "18.x"
