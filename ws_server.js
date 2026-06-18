@@ -11,6 +11,7 @@ let lastUpdate = 0;
 let wsConnection = null;
 let reconnectAttempts = 0;
 let allMessages = [];
+let subscriptionSent = false;
 
 app.get('/', (req, res) => {
     res.json({
@@ -25,8 +26,8 @@ app.get('/', (req, res) => {
 
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
+    subscriptionSent = false;
     
-    // Use the token-based WebSocket connection
     const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket', {
         rejectUnauthorized: false
     });
@@ -41,7 +42,13 @@ function connectWebSocket() {
     ws.on('message', function incoming(data) {
         try {
             const message = data.toString();
-            console.log('📨 RAW MESSAGE:', message);
+            
+            // Only log important messages to avoid spam
+            if (message.startsWith('42/bquote,')) {
+                console.log('📨 BQUOTE MESSAGE RECEIVED');
+            } else if (message !== '3') {
+                console.log('📨 RAW MESSAGE:', message);
+            }
             
             allMessages.push({
                 timestamp: new Date().toISOString(),
@@ -55,37 +62,37 @@ function connectWebSocket() {
             
             // Handle different message types
             if (message === '3') {
-                console.log('✅ Ping response received');
+                // Ping response - ignore
                 return;
             }
             
             if (message === '40') {
                 console.log('✅ Handshake acknowledged');
+                // Send subscription immediately after handshake
+                setTimeout(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        // This is the correct subscription format based on your browser
+                        const subMsg = '42/bquote,["subscribe",{"channel":"quote.realtime"}]';
+                        ws.send(subMsg);
+                        console.log(`📤 Sent subscription: ${subMsg}`);
+                        subscriptionSent = true;
+                    }
+                }, 500);
                 return;
             }
             
-            // Parse Socket.IO events
-            if (message.startsWith('42')) {
+            // Parse bquote messages
+            if (message.startsWith('42/bquote,')) {
                 try {
-                    // Handle the specific format: 42/bquote,["quote.realtime",{...}]
-                    let parsed;
-                    let jsonStr = message.substring(2);
+                    // Extract the JSON part after '/bquote,'
+                    const jsonStr = message.substring(10); // Remove '42/bquote,'
+                    const parsed = JSON.parse(jsonStr);
                     
-                    // Check if it's the bquote format
-                    if (jsonStr.startsWith('/bquote,')) {
-                        jsonStr = jsonStr.substring(8); // Remove '/bquote,'
-                        parsed = JSON.parse(jsonStr);
-                        console.log('📊 BQUOTE DATA:', JSON.stringify(parsed, null, 2));
-                    } else {
-                        parsed = JSON.parse(jsonStr);
-                        console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
-                    }
-                    
-                    // Extract LLG price from the data
+                    // Look for the price data
                     extractLLGPrice(parsed);
                     
                 } catch (e) {
-                    console.log('⚠️ Could not parse JSON:', e.message);
+                    console.log('⚠️ Could not parse bquote:', e.message);
                 }
             }
             
@@ -101,6 +108,7 @@ function connectWebSocket() {
     ws.on('close', function close(code, reason) {
         console.log(`🔌 WebSocket disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
         wsConnection = null;
+        subscriptionSent = false;
         
         const delay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
         console.log(`⏳ Reconnecting in ${delay/1000} seconds...`);
@@ -119,19 +127,23 @@ function getMessageType(message) {
     if (message === '3') return 'ping-response';
     if (message === '40') return 'handshake-ack';
     if (message.startsWith('0')) return 'handshake';
+    if (message.startsWith('42/bquote,')) return 'bquote';
     if (message.startsWith('42')) return 'event';
     if (message.startsWith('2')) return 'ping';
     return 'unknown';
 }
 
 function extractLLGPrice(data) {
-    // Look for the quote.realtime data structure
-    if (Array.isArray(data) && data[0] === 'quote.realtime') {
-        const quoteData = data[1];
-        if (quoteData && quoteData.products) {
-            // XAU= is the LLG product
-            if (quoteData.products['XAU=']) {
-                const price = quoteData.products['XAU='].buy;
+    // The data structure from your message:
+    // ["quote.realtime", {"products": {"XAU=": {"buy": "4315.3"}}}]
+    
+    if (Array.isArray(data)) {
+        // Check if this is the quote.realtime array
+        if (data[0] === 'quote.realtime') {
+            const quoteData = data[1];
+            if (quoteData && quoteData.products && quoteData.products['XAU=']) {
+                const xau = quoteData.products['XAU='];
+                const price = xau.buy;
                 if (price && !isNaN(parseFloat(price))) {
                     currentPrice = price;
                     lastUpdate = Date.now();
@@ -141,21 +153,20 @@ function extractLLGPrice(data) {
         }
     }
     
-    // Also search recursively for any XAU= data
+    // Also search recursively for XAU=
     const searchForXAU = (obj) => {
         if (!obj || typeof obj !== 'object') return;
         
-        // Check if this object has XAU=
         if (obj['XAU=']) {
             const price = obj['XAU='].buy;
             if (price && !isNaN(parseFloat(price))) {
                 currentPrice = price;
                 lastUpdate = Date.now();
                 console.log(`💰 LLG Price found: ${currentPrice}`);
+                return;
             }
         }
         
-        // Recursively search
         Object.values(obj).forEach(value => {
             if (typeof value === 'object' && value !== null) {
                 searchForXAU(value);
@@ -177,7 +188,11 @@ setInterval(() => {
 app.get('/api/messages', (req, res) => {
     res.json({
         total: allMessages.length,
-        messages: allMessages.slice(-50) // Return last 50 messages
+        messages: allMessages.slice(-20).map(m => ({
+            timestamp: m.timestamp,
+            raw: m.raw.length > 200 ? m.raw.substring(0, 200) + '...' : m.raw,
+            type: m.type
+        }))
     });
 });
 
@@ -188,14 +203,18 @@ app.get('/api/llg', (req, res) => {
             timestamp: lastUpdate,
             source: 'websocket',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
-            product: 'LLG'
+            product: 'LLG (XAU=)',
+            subscriptionSent: subscriptionSent
         });
     } else {
         res.status(503).json({
             error: 'No price data available yet',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
             messagesReceived: allMessages.length,
-            lastMessages: allMessages.slice(-5).map(m => m.raw)
+            subscriptionSent: subscriptionSent,
+            lastMessages: allMessages.slice(-5).map(m => 
+                m.raw.length > 100 ? m.raw.substring(0, 100) + '...' : m.raw
+            )
         });
     }
 });
