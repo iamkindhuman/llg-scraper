@@ -4,7 +4,7 @@
   "description": "WebSocket scraper for WF Gold real-time quotes",
   "main": "ws_server.js",
   "scripts": {
-    "start": "node ws_server.js",
+    "start": "NODE_TLS_REJECT_UNAUTHORIZED=0 node ws_server.js",
     "dev": "nodemon ws_server.js"
   },
   "dependencies": {
