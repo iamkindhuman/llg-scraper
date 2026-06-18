@@ -1,13 +1,17 @@
 {
-  "name": "llg-scraper",
+  "name": "wfgold-scraper",
   "version": "1.0.0",
+  "description": "WebSocket scraper for WF Gold real-time quotes",
   "main": "ws_server.js",
   "scripts": {
-    "start": "node ws_server.js"
+    "start": "node ws_server.js",
+    "dev": "nodemon ws_server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "ws": "^8.14.2"
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
   }
 }
