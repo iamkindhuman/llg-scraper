@@ -1,10 +1,6 @@
-const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
-const { EventEmitter } = require('events');
-
-// Create event emitter for real-time data broadcasting
-const dataEmitter = new EventEmitter();
+const { io } = require('socket.io-client');
 
 // Store latest data
 let latestData = {
@@ -14,140 +10,52 @@ let latestData = {
 };
 
 let messageCount = 0;
-let lastMessageTime = null;
+let isConnected = false;
+let lastUpdateTime = null;
 
-// Configuration
-const WS_URL = 'wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket';
-const RECONNECT_INTERVAL = 5000;
-const PING_INTERVAL = 25000;
+// Create Express app
+const app = express();
+const server = http.createServer(app);
 
-class WFGoldScraper {
-  constructor() {
-    this.ws = null;
-    this.pingInterval = null;
-    this.isConnected = false;
-    this.reconnectAttempts = 0;
-    this.maxReconnectAttempts = 100; // Increased for persistence
-  }
+app.use(express.json());
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', '*');
+  next();
+});
 
-  connect() {
-    console.log(`[${new Date().toISOString()}] 🔌 Connecting to WF Gold WebSocket...`);
+// Connect to WF Gold WebSocket using socket.io-client
+function connectToWFGold() {
+  console.log(`[${new Date().toISOString()}] 🔌 Connecting to WF Gold...`);
+  
+  const socket = io('wss://quote.wfgold.com:8082', {
+    transports: ['websocket'],
+    query: {
+      token: 'applepieapplepieapplepieapplepie'
+    },
+    extraHeaders: {
+      'Origin': 'https://www.wfgold.com',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    },
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 5000,
+    reconnectionDelayMax: 30000,
+    timeout: 20000,
+    rejectUnauthorized: false
+  });
+
+  socket.on('connect', () => {
+    console.log(`[${new Date().toISOString()}] ✅ Connected! Socket ID: ${socket.id}`);
+    isConnected = true;
+  });
+
+  socket.on('quote.realtime', (data) => {
+    messageCount++;
+    lastUpdateTime = new Date().toISOString();
     
-    try {
-      this.ws = new WebSocket(WS_URL, {
-        rejectUnauthorized: false,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.8',
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache',
-          'Origin': 'https://www.wfgold.com',
-          'Connection': 'Upgrade',
-          'Upgrade': 'websocket',
-          'Sec-WebSocket-Version': '13',
-          'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits'
-        }
-      });
-      
-      this.ws.on('open', () => {
-        console.log(`[${new Date().toISOString()}] ✅ WebSocket connected successfully!`);
-        this.isConnected = true;
-        this.reconnectAttempts = 0;
-        this.startPing();
-      });
-      
-      this.ws.on('message', (data) => {
-        this.handleMessage(data);
-      });
-      
-      this.ws.on('error', (error) => {
-        console.error(`[${new Date().toISOString()}] ❌ WebSocket error:`, error.message);
-        this.isConnected = false;
-      });
-      
-      this.ws.on('close', (code, reason) => {
-        const reasonStr = reason ? reason.toString() : 'No reason';
-        console.log(`[${new Date().toISOString()}] 🔴 WebSocket closed. Code: ${code}, Reason: ${reasonStr}`);
-        this.isConnected = false;
-        this.stopPing();
-        
-        // Don't reconnect if it was a clean closure requested by us
-        if (code !== 1000) {
-          this.reconnect();
-        }
-      });
-      
-    } catch (error) {
-      console.error(`[${new Date().toISOString()}] ❌ Connection error:`, error.message);
-      this.reconnect();
-    }
-  }
-
-  handleMessage(data) {
-    try {
-      const message = data.toString();
-      messageCount++;
-      lastMessageTime = new Date().toISOString();
-      
-      // Socket.IO protocol handlers
-      if (message === '0') {
-        console.log(`[${lastMessageTime}] 📡 Socket.IO opening packet`);
-        return;
-      }
-      
-      if (message === '40') {
-        console.log(`[${lastMessageTime}] 🔗 Socket.IO connection established`);
-        return;
-      }
-      
-      if (message === '2') {
-        // Server ping
-        if (messageCount <= 5 || messageCount % 100 === 0) {
-          console.log(`[${lastMessageTime}] 💓 Server ping (message #${messageCount})`);
-        }
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send('3'); // Send pong
-        }
-        return;
-      }
-      
-      if (message === '3') {
-        // Server pong
-        return;
-      }
-      
-      // Handle data messages (starts with 42)
-      if (message.startsWith('42')) {
-        try {
-          const jsonStr = message.substring(2);
-          const parsedData = JSON.parse(jsonStr);
-          
-          // Check for quote.realtime
-          if (Array.isArray(parsedData) && parsedData[0] === 'quote.realtime') {
-            this.processQuoteData(parsedData[1]);
-          }
-        } catch (parseError) {
-          // Some messages might not be valid JSON, that's okay
-          if (messageCount <= 10) {
-            console.log(`[${lastMessageTime}] Raw message (#${messageCount}):`, message.substring(0, 100));
-          }
-        }
-      } else if (messageCount <= 5) {
-        // Log other message types for debugging
-        console.log(`[${lastMessageTime}] Other message (#${messageCount}):`, message.substring(0, 100));
-      }
-      
-    } catch (error) {
-      console.error(`[${new Date().toISOString()}] Error processing message:`, error.message);
-    }
-  }
-
-  processQuoteData(data) {
     if (data && data.products) {
-      const timestamp = new Date().toISOString();
-      
-      // Update products data
-      let updatedCount = 0;
+      // Update products
       Object.keys(data.products).forEach(key => {
         const product = data.products[key];
         latestData.products[key] = {
@@ -160,111 +68,69 @@ class WFGoldScraper {
           closeprice: product.closeprice,
           prod_code: product.prod_code,
           mf_id: product.mf_id,
-          lastUpdate: timestamp
+          lastUpdate: lastUpdateTime
         };
-        updatedCount++;
       });
       
-      // Update timezone data
       if (data.tz) {
         latestData.timezones = data.tz;
       }
       
-      latestData.timestamp = timestamp;
+      latestData.timestamp = lastUpdateTime;
       
-      // Emit event
-      dataEmitter.emit('quoteUpdate', {
-        timestamp,
-        products: latestData.products,
-        timezones: latestData.timezones
-      });
-      
-      // Log update
-      console.log(`\n[${timestamp}] 📊 QUOTE UPDATE #${messageCount} - ${updatedCount} products updated`);
-      this.logKeyProducts();
-    }
-  }
-
-  logKeyProducts() {
-    const keyProducts = ['XAU=', 'XAG=', 'EUR=', 'GBP=', 'JPY='];
-    console.log('─'.repeat(60));
-    keyProducts.forEach(code => {
-      if (latestData.products[code]) {
-        const p = latestData.products[code];
-        const name = (p.name?.enUS || p.name?.zhCN || p.id).padEnd(10);
-        console.log(`${name} ${code.padEnd(5)} Buy: ${p.buy.padEnd(10)} Sell: ${p.sell.padEnd(10)} High: ${p.dayhigh.split('/')[0].trim()}`);
+      // Log key products every 10 updates
+      if (messageCount % 10 === 0) {
+        console.log(`\n[${lastUpdateTime}] 📊 Update #${messageCount}`);
+        logKeyProducts();
       }
-    });
-    console.log('─'.repeat(60));
-  }
-
-  startPing() {
-    this.stopPing();
-    this.pingInterval = setInterval(() => {
-      if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send('2');
-      }
-    }, PING_INTERVAL);
-  }
-
-  stopPing() {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
     }
-  }
+  });
 
-  reconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      const delay = RECONNECT_INTERVAL * Math.min(this.reconnectAttempts, 10);
-      
-      console.log(`[${new Date().toISOString()}] ⏳ Reconnecting in ${delay/1000}s... (Attempt ${this.reconnectAttempts})`);
-      
-      setTimeout(() => {
-        this.connect();
-      }, delay);
-    } else {
-      console.error(`[${new Date().toISOString()}] 🔄 Max attempts reached. Restarting connection cycle...`);
-      this.reconnectAttempts = 0;
-      setTimeout(() => this.connect(), 30000);
-    }
-  }
+  socket.on('disconnect', (reason) => {
+    console.log(`[${new Date().toISOString()}] 🔴 Disconnected: ${reason}`);
+    isConnected = false;
+  });
 
-  disconnect() {
-    this.stopPing();
-    if (this.ws) {
-      try {
-        this.ws.close(1000, 'Client disconnect');
-      } catch (error) {
-        console.error('Error closing WebSocket:', error.message);
-      }
-      this.ws = null;
-    }
-    this.isConnected = false;
-  }
+  socket.on('connect_error', (error) => {
+    console.error(`[${new Date().toISOString()}] ❌ Connection error: ${error.message}`);
+    isConnected = false;
+  });
+
+  socket.on('error', (error) => {
+    console.error(`[${new Date().toISOString()}] ❌ Error: ${error}`);
+  });
+
+  // Log first connection and first data
+  socket.on('quote.realtime', function firstData(data) {
+    console.log(`[${new Date().toISOString()}] 📡 First data received!`);
+    logKeyProducts();
+    socket.off('quote.realtime', firstData);
+  });
+
+  return socket;
 }
 
-// Express app
-const app = express();
-const server = http.createServer(app);
-
-app.use(express.json());
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', '*');
-  next();
-});
+function logKeyProducts() {
+  const keyProducts = ['XAU=', 'XAG=', 'EUR=', 'GBP=', 'JPY=', 'HKD='];
+  console.log('─'.repeat(60));
+  keyProducts.forEach(code => {
+    if (latestData.products[code]) {
+      const p = latestData.products[code];
+      const name = (p.name?.enUS || p.id).padEnd(10);
+      console.log(`${name} ${code} Buy: ${p.buy?.padEnd(10)} Sell: ${p.sell?.padEnd(10)}`);
+    }
+  });
+  console.log('─'.repeat(60));
+}
 
 // Routes
 app.get('/', (req, res) => {
   res.json({
     service: 'WF Gold Scraper',
-    version: '1.0.0',
+    version: '2.0.0',
     status: {
-      connected: scraper.isConnected,
-      messageCount: messageCount,
-      lastMessage: lastMessageTime,
+      connected: isConnected,
+      messageCount,
       lastUpdate: latestData.timestamp,
       products: Object.keys(latestData.products).length
     },
@@ -282,7 +148,7 @@ app.get('/api/latest', (req, res) => {
   res.json({
     success: true,
     timestamp: latestData.timestamp,
-    messageCount: messageCount,
+    messageCount,
     data: latestData
   });
 });
@@ -295,7 +161,7 @@ app.get('/api/product/:code', (req, res) => {
     res.status(404).json({ 
       success: false, 
       error: 'Product not found',
-      availableProducts: Object.keys(latestData.products)
+      available: Object.keys(latestData.products)
     });
   }
 });
@@ -303,7 +169,7 @@ app.get('/api/product/:code', (req, res) => {
 app.get('/api/products', (req, res) => {
   const products = Object.values(latestData.products).map(p => ({
     id: p.id,
-    name: p.name?.enUS || p.name?.zhCN || p.id,
+    name: p.name?.enUS || p.id,
     buy: p.buy,
     sell: p.sell,
     dayhigh: p.dayhigh,
@@ -317,49 +183,43 @@ app.get('/api/products', (req, res) => {
 app.get('/api/status', (req, res) => {
   res.json({
     success: true,
-    connected: scraper.isConnected,
-    reconnectAttempts: scraper.reconnectAttempts,
-    messageCount: messageCount,
-    lastMessage: lastMessageTime,
-    lastUpdate: latestData.timestamp
+    connected: isConnected,
+    messageCount,
+    lastUpdate: latestData.timestamp,
+    products: Object.keys(latestData.products).length
   });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', wsConnected: scraper.isConnected, messages: messageCount });
+  res.json({ 
+    status: 'ok', 
+    connected: isConnected, 
+    messages: messageCount,
+    uptime: process.uptime()
+  });
 });
-
-// Initialize scraper
-const scraper = new WFGoldScraper();
 
 // Start server
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`\n🚀 WF Gold Scraper Server`);
+  console.log(`\n🚀 WF Gold Scraper v2.0`);
   console.log(`📡 Port: ${PORT}`);
-  console.log(`🌐 Health: http://localhost:${PORT}/health`);
-  console.log(`📊 Status: http://localhost:${PORT}/api/status`);
-  console.log(`💹 Latest: http://localhost:${PORT}/api/latest`);
-  console.log(``);
+  console.log(`🌐 URL: https://llg-scraper.onrender.com`);
+  console.log(`\n⏳ Connecting to WebSocket in 2 seconds...\n`);
   
-  // Connect WebSocket after server is ready
+  // Connect after server is ready
   setTimeout(() => {
-    console.log(`🔌 Initiating WebSocket connection...`);
-    scraper.connect();
-  }, 1000);
+    connectToWFGold();
+  }, 2000);
 });
 
-// Graceful shutdown
-const shutdown = () => {
+// Handle shutdown
+process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down...');
-  scraper.disconnect();
-  server.close(() => {
-    console.log('✅ Server closed');
-    process.exit(0);
-  });
-};
+  server.close(() => process.exit(0));
+});
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
-
-module.exports = { scraper, dataEmitter, app };
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Shutting down...');
+  server.close(() => process.exit(0));
+});
