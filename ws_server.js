@@ -11,16 +11,15 @@ let lastUpdate = 0;
 let wsConnection = null;
 let reconnectAttempts = 0;
 let allMessages = [];
-let subscriptionAttempts = 0;
 
-// Add route for root
 app.get('/', (req, res) => {
     res.json({
         status: 'OK',
         message: 'LLG Scraper is running',
         endpoints: {
             llg: '/api/llg',
-            messages: '/api/messages'
+            messages: '/api/messages',
+            raw: '/api/raw'
         }
     });
 });
@@ -28,13 +27,15 @@ app.get('/', (req, res) => {
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
     
-    const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket', {
+    // Try without token first
+    const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?EIO=3&transport=websocket', {
         rejectUnauthorized: false
     });
     
     ws.on('open', function open() {
         console.log('✅ WebSocket connected!');
         reconnectAttempts = 0;
+        // Just send handshake, no subscription
         ws.send('40');
         console.log('📤 Sent Socket.IO handshake (40)');
     });
@@ -50,10 +51,11 @@ function connectWebSocket() {
                 type: getMessageType(message)
             });
             
-            if (allMessages.length > 100) {
+            if (allMessages.length > 200) {
                 allMessages.shift();
             }
             
+            // Handle different message types
             if (message === '3') {
                 console.log('✅ Ping response received');
                 return;
@@ -61,25 +63,32 @@ function connectWebSocket() {
             
             if (message === '40') {
                 console.log('✅ Handshake acknowledged');
-                // Try different subscription formats
-                trySubscription(ws);
                 return;
             }
             
-            // Check for any price data
+            // Parse any JSON data
             if (message.startsWith('42')) {
                 try {
                     const jsonStr = message.substring(2);
                     const parsed = JSON.parse(jsonStr);
                     console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
                     
-                    // Search for LLG in the parsed data
-                    const found = findLLGPrice(parsed);
+                    // Look for any numbers that could be prices
+                    const found = findAnyPrice(parsed);
                     if (found) {
-                        console.log('🎯 LLG PRICE FOUND!');
+                        console.log('🎯 POTENTIAL PRICE FOUND!');
                     }
                 } catch (e) {
                     console.log('⚠️ Could not parse JSON:', e.message);
+                }
+            }
+            
+            // If it's a plain number, it might be a price
+            if (/^\d+\.\d+$/.test(message)) {
+                console.log('💰 POSSIBLE PRICE:', message);
+                if (!currentPrice) {
+                    currentPrice = message;
+                    lastUpdate = Date.now();
                 }
             }
             
@@ -109,87 +118,74 @@ function connectWebSocket() {
     wsConnection = ws;
 }
 
-function trySubscription(ws) {
-    const formats = [
-        '42["subscribe","LLG"]',
-        '42["subscribe","price"]',
-        '42["subscribe","all"]',
-        '42["join","LLG"]',
-        '42["subscribe",{"product":"LLG"}]',
-        '42["get","LLG"]',
-        '42["subscribe","market"]',
-        '42["subscribe","quotes"]'
-    ];
-    
-    // Send each format with a delay
-    formats.forEach((format, index) => {
-        setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(format);
-                console.log(`📤 Sent subscription (${index + 1}/${formats.length}): ${format}`);
-            }
-        }, index * 1000);
-    });
-}
-
 function getMessageType(message) {
     if (message === '3') return 'ping-response';
     if (message === '40') return 'handshake-ack';
     if (message.startsWith('0')) return 'handshake';
     if (message.startsWith('42')) return 'event';
     if (message.startsWith('2')) return 'ping';
+    if (/^\d+\.\d+$/.test(message)) return 'possible-price';
     return 'unknown';
 }
 
-function findLLGPrice(data) {
+function findAnyPrice(data) {
     let found = false;
-    const searchLLG = (obj, path = '') => {
+    const searchForNumbers = (obj, path = '') => {
         if (!obj || typeof obj !== 'object') return;
         
-        // Check if this object has LLG or product info
-        if (obj.product === 'LLG' && obj.bid) {
-            currentPrice = obj.bid;
-            lastUpdate = Date.now();
-            console.log(`🎯 FOUND LLG at ${path}:`, obj);
-            console.log(`💰 LLG Bid: ${obj.bid}, Ask: ${obj.ask || 'N/A'}`);
-            found = true;
-            return;
-        }
-        
-        // Check if any key is 'LLG' or 'llg'
-        Object.keys(obj).forEach(key => {
-            if (key === 'LLG' || key === 'llg') {
-                const value = obj[key];
-                if (value && typeof value === 'object') {
-                    if (value.bid) {
-                        currentPrice = value.bid;
-                        lastUpdate = Date.now();
-                        console.log(`🎯 FOUND LLG at ${path}.${key}:`, value);
-                        console.log(`💰 LLG Bid: ${value.bid}, Ask: ${value.ask || 'N/A'}`);
-                        found = true;
-                    }
-                }
-            }
-            
-            if (typeof obj[key] === 'object' && obj[key] !== null) {
-                searchLLG(obj[key], `${path}.${key}`);
-            }
-        });
-        
+        // If it's an array, check each item
         if (Array.isArray(obj)) {
             obj.forEach((item, index) => {
                 if (typeof item === 'object' && item !== null) {
-                    searchLLG(item, `${path}[${index}]`);
+                    searchForNumbers(item, `${path}[${index}]`);
+                } else if (typeof item === 'string' && /^\d+\.\d+$/.test(item)) {
+                    console.log(`💰 Found number at ${path}[${index}]:`, item);
+                    if (!currentPrice) {
+                        currentPrice = item;
+                        lastUpdate = Date.now();
+                    }
+                    found = true;
                 }
             });
+            return;
         }
+        
+        // Check all keys
+        Object.keys(obj).forEach(key => {
+            const value = obj[key];
+            
+            // Check if value is a number string
+            if (typeof value === 'string' && /^\d+\.\d+$/.test(value)) {
+                console.log(`💰 Found number at ${path}.${key}:`, value);
+                if (!currentPrice) {
+                    currentPrice = value;
+                    lastUpdate = Date.now();
+                }
+                found = true;
+            }
+            
+            // Check if value is a number
+            if (typeof value === 'number' && value > 0) {
+                console.log(`💰 Found number at ${path}.${key}:`, value);
+                if (!currentPrice) {
+                    currentPrice = value.toString();
+                    lastUpdate = Date.now();
+                }
+                found = true;
+            }
+            
+            // Recursively search
+            if (typeof value === 'object' && value !== null) {
+                searchForNumbers(value, `${path}.${key}`);
+            }
+        });
     };
     
-    searchLLG(data);
+    searchForNumbers(data);
     return found;
 }
 
-// Keep connection alive with regular pings
+// Keep connection alive
 setInterval(() => {
     if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
         wsConnection.send('2');
@@ -204,6 +200,12 @@ app.get('/api/messages', (req, res) => {
     });
 });
 
+app.get('/api/raw', (req, res) => {
+    // Return only the raw messages as text
+    const raw = allMessages.map(m => m.raw).join('\n');
+    res.type('text/plain').send(raw);
+});
+
 app.get('/api/llg', (req, res) => {
     if (currentPrice) {
         res.json({
@@ -211,14 +213,14 @@ app.get('/api/llg', (req, res) => {
             timestamp: lastUpdate,
             source: 'websocket',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
-            lastMessage: allMessages.length > 0 ? allMessages[allMessages.length - 1] : null
+            totalMessages: allMessages.length
         });
     } else {
         res.status(503).json({
             error: 'No price data available yet',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
             messagesReceived: allMessages.length,
-            lastMessage: allMessages.length > 0 ? allMessages[allMessages.length - 1] : null
+            raw: allMessages.slice(-10).map(m => m.raw) // Show last 10 messages
         });
     }
 });
