@@ -10,7 +10,10 @@ let connected = false;
 
 function connectWebSocket() {
     const ws = new WebSocket(
-        "wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket"
+      "wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket",
+      {
+        rejectUnauthorized: false
+      }
     );
 
     ws.on("open", () => {
