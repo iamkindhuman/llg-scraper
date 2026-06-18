@@ -20,10 +20,16 @@ function connectWebSocket() {
     });
     
     ws.on('open', function open() {
-        console.log('✅ WebSocket connected!');
-        reconnectAttempts = 0;
-        ws.send('40');
-    });
+    console.log('✅ WebSocket connected!');
+    reconnectAttempts = 0;
+    ws.send('40');
+    
+    // Send subscription request for LLG price
+    setTimeout(() => {
+        ws.send('42["subscribe","LLG"]');
+        console.log('📤 Sent subscription for LLG');
+    }, 500);
+});
     
     ws.on('message', function incoming(data) {
         try {
