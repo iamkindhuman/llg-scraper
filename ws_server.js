@@ -1,116 +1,317 @@
-const express = require('express');
-const cors = require('cors');
 const WebSocket = require('ws');
+const express = require('express');
+const http = require('http');
+const { EventEmitter } = require('events');
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+// Create event emitter for real-time data broadcasting
+const dataEmitter = new EventEmitter();
 
-let currentPrice = null;
-let lastUpdate = 0;
-let ws = null;
-let reconnectAttempts = 0;
-let messageCount = 0;
+// Store latest data
+let latestData = {
+  timestamp: null,
+  products: {},
+  timezones: {}
+};
 
-app.get('/', (req, res) => {
-    res.json({
-        status: 'OK',
-        price: currentPrice || 'Not fetched',
-        connected: ws && ws.readyState === WebSocket.OPEN,
-        messages: messageCount
-    });
-});
+// Configuration
+const WS_URL = 'wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket';
+const RECONNECT_INTERVAL = 5000; // 5 seconds
+const PING_INTERVAL = 25000; // 25 seconds
 
-function connectWebSocket() {
-    console.log('🔄 Connecting to WebSocket...');
+class WFGoldScraper {
+  constructor() {
+    this.ws = null;
+    this.pingInterval = null;
+    this.isConnected = false;
+    this.reconnectAttempts = 0;
+    this.maxReconnectAttempts = 10;
+  }
+
+  connect() {
+    console.log(`[${new Date().toISOString()}] Connecting to WF Gold WebSocket...`);
     
-    const wsUrl = 'wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket';
-    
-    ws = new WebSocket(wsUrl, {
-        rejectUnauthorized: false,
-        headers: {
-            'Origin': 'https://www.wfgold.com',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    try {
+      this.ws = new WebSocket(WS_URL);
+      
+      this.ws.on('open', () => {
+        console.log(`[${new Date().toISOString()}] WebSocket connected successfully`);
+        this.isConnected = true;
+        this.reconnectAttempts = 0;
+        
+        // Send ping periodically to keep connection alive
+        this.startPing();
+      });
+      
+      this.ws.on('message', (data) => {
+        this.handleMessage(data);
+      });
+      
+      this.ws.on('error', (error) => {
+        console.error(`[${new Date().toISOString()}] WebSocket error:`, error.message);
+        this.isConnected = false;
+      });
+      
+      this.ws.on('close', (code, reason) => {
+        console.log(`[${new Date().toISOString()}] WebSocket closed. Code: ${code}, Reason: ${reason}`);
+        this.isConnected = false;
+        this.stopPing();
+        this.reconnect();
+      });
+      
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Connection error:`, error.message);
+      this.reconnect();
+    }
+  }
+
+  handleMessage(data) {
+    try {
+      const message = data.toString();
+      
+      // Socket.IO protocol messages
+      if (message === '2') {
+        // Ping from server, respond with pong
+        this.ws.send('3');
+        return;
+      }
+      
+      if (message === '3') {
+        // Pong from server
+        return;
+      }
+      
+      if (message.startsWith('40')) {
+        // Connection established, send subscription if needed
+        console.log(`[${new Date().toISOString()}] Socket.IO connection established`);
+        return;
+      }
+      
+      // Handle actual data messages (starts with 42)
+      if (message.startsWith('42')) {
+        const jsonStr = message.substring(2); // Remove '42' prefix
+        const parsedData = JSON.parse(jsonStr);
+        
+        // Check if it's a quote.realtime message
+        if (Array.isArray(parsedData) && parsedData[0] === 'quote.realtime') {
+          this.processQuoteData(parsedData[1]);
         }
-    });
+      }
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Error processing message:`, error.message);
+    }
+  }
+
+  processQuoteData(data) {
+    if (data && data.products) {
+      const timestamp = new Date().toISOString();
+      
+      // Update products data
+      Object.keys(data.products).forEach(key => {
+        const product = data.products[key];
+        latestData.products[key] = {
+          id: product.id,
+          name: product.name,
+          buy: product.buy,
+          sell: product.sell,
+          dayhigh: product.dayhigh,
+          daylow: product.daylow,
+          closeprice: product.closeprice,
+          prod_code: product.prod_code,
+          lastUpdate: timestamp
+        };
+      });
+      
+      // Update timezone data
+      if (data.tz) {
+        latestData.timezones = data.tz;
+      }
+      
+      latestData.timestamp = timestamp;
+      
+      // Emit event with new data
+      dataEmitter.emit('quoteUpdate', {
+        timestamp,
+        products: latestData.products,
+        timezones: latestData.timezones
+      });
+      
+      // Log key products updates
+      this.logKeyProducts(latestData.products);
+    }
+  }
+
+  logKeyProducts(products) {
+    const keyProducts = ['XAU=', 'XAG=', 'EUR=', 'GBP=', 'JPY=', 'HKD='];
+    const timestamp = new Date().toISOString();
     
-    ws.on('open', function() {
-        console.log('✅ WebSocket connected!');
-        reconnectAttempts = 0;
-        ws.send('40');
-        console.log('📤 Sent handshake (40)');
-        
-        setTimeout(() => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send('42/bquote,["subscribe",{"channel":"quote.realtime"}]');
-                console.log('📤 Sent subscription');
-            }
-        }, 1000);
+    keyProducts.forEach(code => {
+      if (products[code]) {
+        const product = products[code];
+        const name = product.name?.enUS || product.name?.zhCN || product.id;
+        console.log(`[${timestamp}] ${name} (${code}): Buy=${product.buy}, Sell=${product.sell}`);
+      }
     });
-    
-    ws.on('message', function(data) {
-        const msg = data.toString();
-        messageCount++;
-        
-        // Log only when we get data
-        if (msg.includes('"XAU="')) {
-            const match = msg.match(/"XAU="[^}]*"buy":"([0-9.]+)"/);
-            if (match && match[1]) {
-                currentPrice = match[1];
-                lastUpdate = Date.now();
-                console.log(`💰 LLG Price: ${currentPrice}`);
-            }
-        }
-        
-        // Log first 100 chars of each message for debugging
-        if (msg !== '3' && msg !== '40' && !msg.startsWith('0')) {
-            console.log(`📨 ${msg.substring(0, 100)}${msg.length > 100 ? '...' : ''}`);
-        }
-    });
-    
-    ws.on('error', function(err) {
-        console.error('❌ WebSocket error:', err.message);
-    });
-    
-    ws.on('close', function() {
-        console.log('🔌 WebSocket disconnected');
-        ws = null;
-        
-        const delay = Math.min(5000 * Math.pow(1.5, reconnectAttempts), 30000);
-        console.log(`⏳ Reconnecting in ${delay/1000}s...`);
-        setTimeout(() => {
-            reconnectAttempts++;
-            connectWebSocket();
-        }, delay);
-    });
+  }
+
+  startPing() {
+    this.pingInterval = setInterval(() => {
+      if (this.isConnected && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send('2'); // Send ping to keep connection alive
+      }
+    }, PING_INTERVAL);
+  }
+
+  stopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  reconnect() {
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+      const delay = RECONNECT_INTERVAL * Math.min(this.reconnectAttempts, 5);
+      
+      console.log(`[${new Date().toISOString()}] Reconnecting in ${delay/1000} seconds... (Attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+      
+      setTimeout(() => {
+        this.connect();
+      }, delay);
+    } else {
+      console.error(`[${new Date().toISOString()}] Max reconnection attempts reached. Stopping.`);
+      // You might want to implement a manual restart mechanism here
+    }
+  }
+
+  disconnect() {
+    this.stopPing();
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+    this.isConnected = false;
+  }
 }
 
-// Keep connection alive
-setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send('2');
-    }
-}, 15000);
+// Create Express app for REST API
+const app = express();
+const server = http.createServer(app);
 
-app.get('/api/llg', (req, res) => {
-    if (currentPrice) {
-        res.json({
-            bid: currentPrice,
-            timestamp: lastUpdate,
-            connected: ws && ws.readyState === WebSocket.OPEN,
-            messages: messageCount
-        });
-    } else {
-        res.status(503).json({
-            error: 'No price data available',
-            connected: ws && ws.readyState === WebSocket.OPEN,
-            messages: messageCount
-        });
-    }
+// Parse JSON bodies
+app.use(express.json());
+
+// CORS middleware
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  next();
 });
 
+// Routes
+
+// Get all latest data
+app.get('/api/latest', (req, res) => {
+  res.json({
+    success: true,
+    data: latestData,
+    connectionStatus: scraper.isConnected
+  });
+});
+
+// Get specific product
+app.get('/api/product/:code', (req, res) => {
+  const code = req.params.code;
+  if (latestData.products[code]) {
+    res.json({
+      success: true,
+      data: latestData.products[code]
+    });
+  } else {
+    res.status(404).json({
+      success: false,
+      error: 'Product not found'
+    });
+  }
+});
+
+// Get all products list
+app.get('/api/products', (req, res) => {
+  const products = Object.values(latestData.products).map(p => ({
+    id: p.id,
+    name: p.name?.enUS || p.name?.zhCN || p.id,
+    buy: p.buy,
+    sell: p.sell,
+    prod_code: p.prod_code
+  }));
+  
+  res.json({
+    success: true,
+    count: products.length,
+    data: products
+  });
+});
+
+// Get connection status
+app.get('/api/status', (req, res) => {
+  res.json({
+    success: true,
+    connected: scraper.isConnected,
+    reconnectAttempts: scraper.reconnectAttempts,
+    lastUpdate: latestData.timestamp,
+    productsCount: Object.keys(latestData.products).length
+  });
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    wsConnected: scraper.isConnected
+  });
+});
+
+// Initialize scraper
+const scraper = new WFGoldScraper();
+
+// Start WebSocket connection
+scraper.connect();
+
+// Start Express server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`✅ Server running on port ${PORT}`);
-    connectWebSocket();
+server.listen(PORT, () => {
+  console.log(`\n=================================`);
+  console.log(`WF Gold Scraper Server`);
+  console.log(`=================================`);
+  console.log(`Server running on port ${PORT}`);
+  console.log(`API endpoints:`);
+  console.log(`  - GET /api/latest        : All latest data`);
+  console.log(`  - GET /api/product/:code  : Specific product`);
+  console.log(`  - GET /api/products      : Products list`);
+  console.log(`  - GET /api/status        : Connection status`);
+  console.log(`  - GET /health            : Health check`);
+  console.log(`=================================\n`);
 });
+
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\nShutting down gracefully...');
+  scraper.disconnect();
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('\nShutting down gracefully...');
+  scraper.disconnect();
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+// Export for testing or external use
+module.exports = { scraper, dataEmitter, app };
