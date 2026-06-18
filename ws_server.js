@@ -14,39 +14,64 @@ let reconnectAttempts = 0;
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
     
-    // IMPORTANT: Disable certificate verification for this specific connection
     const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket', {
-        rejectUnauthorized: false  // This bypasses certificate verification
+        rejectUnauthorized: false
     });
     
     ws.on('open', function open() {
-    console.log('✅ WebSocket connected!');
-    reconnectAttempts = 0;
-    ws.send('40');
-    
-    // Send subscription request for LLG price
-    setTimeout(() => {
-        ws.send('42["subscribe","LLG"]');
-        console.log('📤 Sent subscription for LLG');
-    }, 500);
-});
+        console.log('✅ WebSocket connected!');
+        reconnectAttempts = 0;
+        
+        // Step 1: Send the Socket.IO handshake (required!)
+        ws.send('40');
+        console.log('📤 Sent Socket.IO handshake (40)');
+        
+        // Step 2: After handshake, send ping to keep connection alive
+        setTimeout(() => {
+            ws.send('2');
+            console.log('📤 Sent ping (2)');
+        }, 1000);
+    });
     
     ws.on('message', function incoming(data) {
         try {
             const message = data.toString();
+            console.log('📨 Received:', message);
             
-            // Look for price data in the messages
+            // Socket.IO ping response
+            if (message === '3') {
+                console.log('✅ Ping response received');
+                return;
+            }
+            
+            // Socket.IO handshake acknowledgment
+            if (message.startsWith('40')) {
+                console.log('✅ Handshake acknowledged');
+                return;
+            }
+            
+            // Check for price data (Socket.IO event format: 42["event", data])
             if (message.startsWith('42')) {
                 const jsonStr = message.substring(2);
                 const parsed = JSON.parse(jsonStr);
                 
                 // Handle array format: ["eventName", data]
-                if (Array.isArray(parsed) && parsed[0] === 'price') {
-                    const priceData = parsed[1];
-                    if (priceData && priceData.product === 'LLG') {
-                        currentPrice = priceData.bid;
-                        lastUpdate = Date.now();
-                        console.log('💰 LLG Bid updated:', currentPrice);
+                if (Array.isArray(parsed)) {
+                    const eventName = parsed[0];
+                    const eventData = parsed[1];
+                    
+                    if (eventName === 'price' || eventName === 'update') {
+                        if (eventData && eventData.product === 'LLG') {
+                            currentPrice = eventData.bid;
+                            lastUpdate = Date.now();
+                            console.log('💰 LLG Bid updated:', currentPrice);
+                        }
+                        // If data is nested differently
+                        else if (eventData && eventData.LLG) {
+                            currentPrice = eventData.LLG.bid;
+                            lastUpdate = Date.now();
+                            console.log('💰 LLG Bid updated:', currentPrice);
+                        }
                     }
                 }
                 // Handle object format directly
@@ -57,7 +82,7 @@ function connectWebSocket() {
                 }
             }
         } catch (e) {
-            // Silent ignore for non-JSON messages
+            // Not JSON or not price data - ignore
         }
     });
     
@@ -65,16 +90,19 @@ function connectWebSocket() {
         console.error('❌ WebSocket error:', err.message);
     });
     
-    ws.on('close', function close() {
-        console.log('🔌 WebSocket disconnected. Reconnecting...');
+    ws.on('close', function close(code, reason) {
+        console.log(`🔌 WebSocket disconnected. Code: ${code}, Reason: ${reason || 'No reason provided'}`);
         wsConnection = null;
         
+        // Exponential backoff reconnect
+        const delay = Math.min(3000 * Math.pow(1.5, reconnectAttempts), 30000);
+        console.log(`⏳ Reconnecting in ${delay/1000} seconds...`);
         setTimeout(() => {
             if (reconnectAttempts < 20) {
                 reconnectAttempts++;
                 connectWebSocket();
             }
-        }, 3000);
+        }, delay);
     });
     
     wsConnection = ws;
@@ -90,7 +118,8 @@ app.get('/api/llg', (req, res) => {
     } else {
         res.status(503).json({
             error: 'No price data available yet',
-            connected: wsConnection !== null
+            connected: wsConnection !== null,
+            status: 'Waiting for data'
         });
     }
 });
@@ -99,7 +128,8 @@ app.get('/', (req, res) => {
     res.json({
         status: 'OK',
         connected: wsConnection !== null,
-        price: currentPrice || 'Not fetched'
+        price: currentPrice || 'Not fetched',
+        lastUpdate: lastUpdate ? new Date(lastUpdate).toISOString() : null
     });
 });
 
