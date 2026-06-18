@@ -1,4 +1,3 @@
-// Alternative: ws_server_v2.js
 const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
@@ -6,7 +5,8 @@ const http = require('http');
 let latestData = {
   timestamp: null,
   products: {},
-  timezones: {}
+  timezones: {},
+  raw: null
 };
 
 let messageCount = 0;
@@ -26,7 +26,6 @@ app.use((req, res, next) => {
 function connectToWFGold() {
   console.log(`[${new Date().toISOString()}] 🔌 Connecting to WF Gold...`);
   
-  // Socket.IO v2 uses different URL format
   const wsUrl = 'wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket';
   
   const ws = new WebSocket(wsUrl, {
@@ -38,6 +37,8 @@ function connectToWFGold() {
     }
   });
 
+  let pingInterval;
+
   ws.on('open', () => {
     console.log(`[${new Date().toISOString()}] ✅ WebSocket connected!`);
     isConnected = true;
@@ -47,22 +48,52 @@ function connectToWFGold() {
     const msg = data.toString();
     messageCount++;
     
-    // Socket.IO v2 protocol: messages start with 42["event", data]
-    if (msg.startsWith('0')) {
-      console.log(`[${new Date().toISOString()}] 📡 Handshake received`);
+    // Log first few messages for debugging
+    if (messageCount <= 10) {
+      console.log(`[MSG #${messageCount}] ${msg.substring(0, 150)}`);
+    }
+    
+    // Socket.IO v2 protocol handling
+    if (msg.startsWith('0{')) {
+      console.log(`📡 Handshake received`);
+      // Start ping after handshake
+      pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send('2');
+        }
+      }, 20000);
       return;
     }
     
     if (msg === '40') {
-      console.log(`[${new Date().toISOString()}] 🔗 Connection established`);
+      console.log(`🔗 Connected to Socket.IO`);
+      
+      // SUBSCRIBE TO QUOTE.REALTIME - This is the key!
+      // Socket.IO v2 format for subscribing
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          console.log(`📨 Subscribing to quote.realtime...`);
+          // Try different subscription formats
+          ws.send('42["subscribe",{"channel":"quote.realtime"}]');
+          
+          setTimeout(() => {
+            ws.send('42["join","quote.realtime"]');
+          }, 500);
+        }
+      }, 1000);
       return;
     }
     
     if (msg === '2') {
-      // Server ping, respond with pong
+      // Server ping
       if (ws.readyState === WebSocket.OPEN) {
         ws.send('3');
       }
+      return;
+    }
+    
+    if (msg === '3') {
+      // Server pong
       return;
     }
     
@@ -72,119 +103,101 @@ function connectToWFGold() {
         const jsonStr = msg.substring(2);
         const parsed = JSON.parse(jsonStr);
         
-        if (Array.isArray(parsed) && parsed[0] === 'quote.realtime') {
-          const data = parsed[1];
-          lastUpdateTime = new Date().toISOString();
+        if (Array.isArray(parsed)) {
+          const eventName = parsed[0];
+          const eventData = parsed[1];
           
-          if (data && data.products) {
-            Object.keys(data.products).forEach(key => {
+          console.log(`📊 Event: ${eventName}`);
+          
+          if (eventName === 'quote.realtime' && eventData && eventData.products) {
+            lastUpdateTime = new Date().toISOString();
+            
+            // Store all raw data
+            latestData.raw = eventData;
+            
+            // Update products
+            Object.keys(eventData.products).forEach(key => {
               latestData.products[key] = {
-                ...data.products[key],
+                ...eventData.products[key],
                 lastUpdate: lastUpdateTime
               };
             });
             
-            if (data.tz) {
-              latestData.timezones = data.tz;
+            if (eventData.tz) {
+              latestData.timezones = eventData.tz;
             }
             
             latestData.timestamp = lastUpdateTime;
             
-            if (messageCount === 2 || messageCount % 50 === 0) {
-              console.log(`[${lastUpdateTime}] 📊 Update #${messageCount-1}`);
-              logKeyProducts();
-            }
+            console.log(`✅ QUOTE DATA RECEIVED! ${Object.keys(eventData.products).length} products`);
+            logKeyProducts();
           }
         }
       } catch (e) {
-        if (messageCount <= 5) {
-          console.log(`Raw message: ${msg.substring(0, 100)}`);
-        }
+        console.log(`Parse error: ${e.message}`);
+        console.log(`Raw: ${msg.substring(0, 200)}`);
       }
     }
   });
 
   ws.on('error', (error) => {
-    console.error(`[${new Date().toISOString()}] ❌ Error: ${error.message}`);
+    console.error(`❌ Error: ${error.message}`);
     isConnected = false;
   });
 
   ws.on('close', (code, reason) => {
-    console.log(`[${new Date().toISOString()}] 🔴 Closed: ${code} - ${reason}`);
+    console.log(`🔴 Closed: ${code}`);
     isConnected = false;
-    // Reconnect after 5 seconds
+    if (pingInterval) clearInterval(pingInterval);
     setTimeout(connectToWFGold, 5000);
-  });
-
-  // Keep alive with pings
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send('2');
-    }
-  }, 20000);
-
-  ws.on('close', () => {
-    clearInterval(pingInterval);
   });
 
   return ws;
 }
 
 function logKeyProducts() {
-  const keyProducts = ['XAU=', 'XAG=', 'EUR=', 'GBP=', 'JPY='];
-  console.log('─'.repeat(60));
-  keyProducts.forEach(code => {
+  console.log('═'.repeat(60));
+  const products = ['XAU=', 'XAG=', 'EUR=', 'GBP=', 'JPY=', 'HKD='];
+  products.forEach(code => {
     if (latestData.products[code]) {
       const p = latestData.products[code];
-      console.log(`${code} Buy: ${p.buy} Sell: ${p.sell}`);
+      const name = (p.name?.enUS || p.id).padEnd(12);
+      console.log(`  ${name} ${code}  Buy: ${p.buy?.padEnd(10)} Sell: ${p.sell?.padEnd(10)}`);
     }
   });
-  console.log('─'.repeat(60));
+  console.log('═'.repeat(60));
 }
 
-// Routes (same as before)
+// API Routes
 app.get('/', (req, res) => {
   res.json({
     service: 'WF Gold Scraper',
     connected: isConnected,
     messageCount,
-    lastUpdate: latestData.timestamp
+    lastUpdate: latestData.timestamp,
+    products: Object.keys(latestData.products).length
   });
 });
 
 app.get('/api/latest', (req, res) => {
-  res.json({ success: true, data: latestData });
+  res.json(latestData);
 });
 
 app.get('/api/product/:code', (req, res) => {
   const code = req.params.code;
   if (latestData.products[code]) {
-    res.json({ success: true, data: latestData.products[code] });
+    res.json(latestData.products[code]);
   } else {
-    res.status(404).json({ 
-      success: false, 
-      error: 'Product not found',
-      available: Object.keys(latestData.products)
-    });
+    res.status(404).json({ error: 'Not found' });
   }
-});
-
-app.get('/api/products', (req, res) => {
-  const products = Object.values(latestData.products).map(p => ({
-    id: p.id,
-    name: p.name?.enUS || p.id,
-    buy: p.buy,
-    sell: p.sell
-  }));
-  res.json({ success: true, data: products });
 });
 
 app.get('/api/status', (req, res) => {
   res.json({
-    success: true,
     connected: isConnected,
     messageCount,
-    lastUpdate: latestData.timestamp
+    lastUpdate: latestData.timestamp,
+    products: Object.keys(latestData.products).length
   });
 });
 
@@ -194,10 +207,9 @@ app.get('/health', (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server on port ${PORT}`);
-  setTimeout(connectToWFGold, 2000);
+  console.log(`\n🚀 WF Gold Scraper on port ${PORT}`);
+  console.log(`⏳ Connecting in 3 seconds...\n`);
+  setTimeout(connectToWFGold, 3000);
 });
 
-process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
-});
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
