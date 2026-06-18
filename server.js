@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const axios = require('axios');
+const cheerio = require('cheerio');
 const app = express();
 
 app.use(cors());
@@ -10,56 +11,35 @@ let cachedPrice = null;
 let lastUpdate = 0;
 
 async function scrapeLLG() {
-    let browser = null;
     try {
-        console.log('Starting Puppeteer...');
-        
-        // For Render, we need to find Chrome
-        const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
-                              '/usr/bin/google-chrome-stable' ||
-                              '/usr/bin/chromium' ||
-                              undefined;
-        
-        browser = await puppeteer.launch({
-            headless: true,
-            executablePath: executablePath,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--disable-gpu',
-                '--disable-features=site-per-process'
-            ]
+        console.log('🌐 Fetching Wing Fung page...');
+        const response = await axios.get('https://www.wfgold.com/en-us', {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Cache-Control': 'no-cache'
+            },
+            timeout: 30000
         });
         
-        console.log('Browser launched, opening page...');
-        const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+        const html = response.data;
+        const $ = cheerio.load(html);
         
-        console.log('Navigating to Wing Fung...');
-        await page.goto('https://www.wfgold.com/en-us', {
-            waitUntil: 'networkidle2',
-            timeout: 45000
-        });
+        // Get all text content from the page
+        const text = $('body').text();
         
-        console.log('Page loaded, waiting for content...');
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        const content = await page.content();
-        console.log('Content length:', content.length);
-        
+        // Look for LLG in the text
         const patterns = [
             /LLG[^0-9]*([0-9]+\.[0-9]+)/i,
             /LLG.*?([0-9]+\.[0-9]+)\s*\/\s*([0-9]+\.[0-9]+)/i,
             /LLG[^<]*?([0-9]+\.[0-9]+)/i,
             /"LLG".*?"bid":"?([0-9]+\.[0-9]+)/i,
-            /"llg".*?"bid":"?([0-9]+\.[0-9]+)/i,
-            /LLG[^0-9]*([0-9]+\.[0-9]+)/i
+            /"llg".*?"bid":"?([0-9]+\.[0-9]+)/i
         ];
         
         for (const pattern of patterns) {
-            const match = content.match(pattern);
+            const match = text.match(pattern);
             if (match && match[1]) {
                 const price = parseFloat(match[1]);
                 if (!isNaN(price) && price > 0) {
@@ -69,26 +49,11 @@ async function scrapeLLG() {
             }
         }
         
-        // Try to find in the whole page text
-        const text = await page.evaluate(() => document.body.innerText);
-        const llgIndex = text.indexOf('LLG');
-        if (llgIndex !== -1) {
-            const snippet = text.substring(llgIndex, llgIndex + 50);
-            const numMatch = snippet.match(/([0-9]+\.[0-9]+)/);
-            if (numMatch) {
-                console.log('✅ Found LLG price from text:', numMatch[1]);
-                return numMatch[1];
-            }
-        }
-        
-        console.log('❌ LLG price not found in page');
+        console.log('❌ LLG price not found');
         return null;
     } catch (error) {
         console.error('❌ Scraping error:', error.message);
         return null;
-    } finally {
-        if (browser) await browser.close();
-        console.log('Browser closed');
     }
 }
 
@@ -97,7 +62,7 @@ app.get('/api/llg', async (req, res) => {
     
     // Return cached price if less than 10 seconds old
     if (cachedPrice && (now - lastUpdate) < 10000) {
-        console.log('Returning cached price:', cachedPrice);
+        console.log('📦 Returning cached price:', cachedPrice);
         return res.json({ 
             bid: cachedPrice, 
             cached: true,
@@ -105,7 +70,7 @@ app.get('/api/llg', async (req, res) => {
         });
     }
     
-    console.log('Fetching new price...');
+    console.log('🔄 Fetching new price...');
     const price = await scrapeLLG();
     
     if (price) {
@@ -113,7 +78,7 @@ app.get('/api/llg', async (req, res) => {
         lastUpdate = now;
         res.json({ bid: price, cached: false, timestamp: now });
     } else if (cachedPrice) {
-        console.log('Scrape failed, returning cached price:', cachedPrice);
+        console.log('📦 Scrape failed, returning cached price:', cachedPrice);
         res.json({ bid: cachedPrice, cached: true, timestamp: lastUpdate });
     } else {
         console.log('❌ No price available');
