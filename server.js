@@ -13,7 +13,12 @@ async function scrapeLLG() {
     let browser = null;
     try {
         console.log('Starting Puppeteer...');
-        const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+        
+        // For Render, we need to find Chrome
+        const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || 
+                              '/usr/bin/google-chrome-stable' ||
+                              '/usr/bin/chromium' ||
+                              undefined;
         
         browser = await puppeteer.launch({
             headless: true,
@@ -23,7 +28,8 @@ async function scrapeLLG() {
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-accelerated-2d-canvas',
-                '--disable-gpu'
+                '--disable-gpu',
+                '--disable-features=site-per-process'
             ]
         });
         
@@ -38,7 +44,7 @@ async function scrapeLLG() {
         });
         
         console.log('Page loaded, waiting for content...');
-        await page.waitForTimeout(3000);
+        await new Promise(resolve => setTimeout(resolve, 3000));
         
         const content = await page.content();
         console.log('Content length:', content.length);
@@ -48,7 +54,8 @@ async function scrapeLLG() {
             /LLG.*?([0-9]+\.[0-9]+)\s*\/\s*([0-9]+\.[0-9]+)/i,
             /LLG[^<]*?([0-9]+\.[0-9]+)/i,
             /"LLG".*?"bid":"?([0-9]+\.[0-9]+)/i,
-            /"llg".*?"bid":"?([0-9]+\.[0-9]+)/i
+            /"llg".*?"bid":"?([0-9]+\.[0-9]+)/i,
+            /LLG[^0-9]*([0-9]+\.[0-9]+)/i
         ];
         
         for (const pattern of patterns) {
@@ -59,6 +66,18 @@ async function scrapeLLG() {
                     console.log('✅ Found LLG price:', price);
                     return match[1];
                 }
+            }
+        }
+        
+        // Try to find in the whole page text
+        const text = await page.evaluate(() => document.body.innerText);
+        const llgIndex = text.indexOf('LLG');
+        if (llgIndex !== -1) {
+            const snippet = text.substring(llgIndex, llgIndex + 50);
+            const numMatch = snippet.match(/([0-9]+\.[0-9]+)/);
+            if (numMatch) {
+                console.log('✅ Found LLG price from text:', numMatch[1]);
+                return numMatch[1];
             }
         }
         
@@ -76,8 +95,8 @@ async function scrapeLLG() {
 app.get('/api/llg', async (req, res) => {
     const now = Date.now();
     
-    // Return cached price if less than 5 seconds old
-    if (cachedPrice && (now - lastUpdate) < 5000) {
+    // Return cached price if less than 10 seconds old
+    if (cachedPrice && (now - lastUpdate) < 10000) {
         console.log('Returning cached price:', cachedPrice);
         return res.json({ 
             bid: cachedPrice, 
