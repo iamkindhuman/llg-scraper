@@ -1,95 +1,88 @@
-const express = require('express');
+const express = require("express");
+const WebSocket = require("ws");
+
+const PORT = process.env.PORT || 3000;
+
 const app = express();
-const server = require('http').createServer(app);
-const io = require('socket.io-client');
 
-// Store latest data
-let latestQuoteData = null;
-let isConnected = false;
+let latestQuotes = {};
+let connected = false;
 
-app.use(express.json());
+function connectWebSocket() {
+    const ws = new WebSocket(
+        "wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket"
+    );
 
-// CORS
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  next();
-});
+    ws.on("open", () => {
+        console.log("WebSocket connected");
+        connected = true;
+    });
 
-// Connect to WF Gold WebSocket
-function connectWFGold() {
-  console.log('Connecting to WF Gold...');
-  
-  const socket = io('https://quote.wfgold.com:8082', {
-    transports: ['websocket'],
-    query: 'token=applepieapplepieapplepieapplepie',
-    extraHeaders: {
-      'Origin': 'https://www.wfgold.com'
-    },
-    reconnection: true,
-    reconnectionDelay: 5000,
-    reconnectionAttempts: Infinity
-  });
+    ws.on("message", (data) => {
+        const msg = data.toString();
 
-  socket.on('connect', () => {
-    console.log('✅ Connected! ID:', socket.id);
-    isConnected = true;
-  });
+        // Engine.IO ping
+        if (msg === "2") {
+            ws.send("3");
+            return;
+        }
 
-  socket.on('quote.realtime', (data) => {
-    latestQuoteData = data;
-    console.log('📊 Data received:', new Date().toISOString());
-  });
+        if (msg.startsWith("42/bquote,")) {
+            try {
+                const packet = JSON.parse(
+                    msg.substring("42/bquote,".length)
+                );
 
-  socket.on('disconnect', (reason) => {
-    console.log('🔴 Disconnected:', reason);
-    isConnected = false;
-  });
+                const eventName = packet[0];
+                const payload = packet[1];
 
-  socket.on('connect_error', (err) => {
-    console.error('❌ Error:', err.message);
-    isConnected = false;
-  });
+                if (eventName === "quote.realtime") {
+                    latestQuotes = payload.products || {};
+
+                    console.log(
+                        "Updated:",
+                        new Date().toISOString(),
+                        "XAU:",
+                        latestQuotes?.XAU?.buy
+                    );
+                }
+            } catch (err) {
+                console.error(err);
+            }
+        }
+    });
+
+    ws.on("close", () => {
+        console.log("WebSocket closed");
+        connected = false;
+
+        setTimeout(connectWebSocket, 5000);
+    });
+
+    ws.on("error", (err) => {
+        console.error("WebSocket error:", err.message);
+    });
 }
 
-// API endpoint - returns the exact WebSocket data
-app.get('/api/data', (req, res) => {
-  if (!latestQuoteData) {
-    return res.json({ error: 'No data yet', connected: isConnected });
-  }
-  res.json(latestQuoteData);
+connectWebSocket();
+
+app.get("/", (req, res) => {
+    res.json({
+        status: connected ? "connected" : "disconnected",
+        symbols: Object.keys(latestQuotes).length
+    });
 });
 
-// Status endpoint
-app.get('/api/status', (req, res) => {
-  res.json({
-    connected: isConnected,
-    hasData: latestQuoteData !== null,
-    timestamp: new Date().toISOString()
-  });
+app.get("/quotes", (req, res) => {
+    res.json(latestQuotes);
 });
 
-// Health check for Render
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', connected: isConnected });
+app.get("/quote/:symbol", (req, res) => {
+    const symbol = req.params.symbol;
+
+    res.json(latestQuotes[symbol] || {});
 });
 
-// Home page
-app.get('/', (req, res) => {
-  res.json({
-    service: 'WF Gold Scraper',
-    connected: isConnected,
-    hasData: latestQuoteData !== null,
-    endpoints: {
-      data: '/api/data',
-      status: '/api/status',
-      health: '/health'
-    }
-  });
-});
-
-// Start
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  connectWFGold();
+app.listen(PORT, () => {
+    console.log(`Server running on ${PORT}`);
 });
