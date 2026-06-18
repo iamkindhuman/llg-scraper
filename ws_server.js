@@ -6,7 +6,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Add this route handler for the root URL
+let currentPrice = null;
+let lastUpdate = 0;
+let wsConnection = null;
+let reconnectAttempts = 0;
+let allMessages = [];
+let subscriptionAttempts = 0;
+
+// Add route for root
 app.get('/', (req, res) => {
     res.json({
         status: 'OK',
@@ -17,12 +24,6 @@ app.get('/', (req, res) => {
         }
     });
 });
-
-let currentPrice = null;
-let lastUpdate = 0;
-let wsConnection = null;
-let reconnectAttempts = 0;
-let allMessages = [];
 
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
@@ -60,17 +61,23 @@ function connectWebSocket() {
             
             if (message === '40') {
                 console.log('✅ Handshake acknowledged');
-                ws.send('42["subscribe","LLG"]');
-                console.log('📤 Sent subscription for LLG');
+                // Try different subscription formats
+                trySubscription(ws);
                 return;
             }
             
+            // Check for any price data
             if (message.startsWith('42')) {
                 try {
                     const jsonStr = message.substring(2);
                     const parsed = JSON.parse(jsonStr);
                     console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
-                    findLLGPrice(parsed);
+                    
+                    // Search for LLG in the parsed data
+                    const found = findLLGPrice(parsed);
+                    if (found) {
+                        console.log('🎯 LLG PRICE FOUND!');
+                    }
                 } catch (e) {
                     console.log('⚠️ Could not parse JSON:', e.message);
                 }
@@ -102,6 +109,29 @@ function connectWebSocket() {
     wsConnection = ws;
 }
 
+function trySubscription(ws) {
+    const formats = [
+        '42["subscribe","LLG"]',
+        '42["subscribe","price"]',
+        '42["subscribe","all"]',
+        '42["join","LLG"]',
+        '42["subscribe",{"product":"LLG"}]',
+        '42["get","LLG"]',
+        '42["subscribe","market"]',
+        '42["subscribe","quotes"]'
+    ];
+    
+    // Send each format with a delay
+    formats.forEach((format, index) => {
+        setTimeout(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(format);
+                console.log(`📤 Sent subscription (${index + 1}/${formats.length}): ${format}`);
+            }
+        }, index * 1000);
+    });
+}
+
 function getMessageType(message) {
     if (message === '3') return 'ping-response';
     if (message === '40') return 'handshake-ack';
@@ -112,17 +142,21 @@ function getMessageType(message) {
 }
 
 function findLLGPrice(data) {
+    let found = false;
     const searchLLG = (obj, path = '') => {
         if (!obj || typeof obj !== 'object') return;
         
+        // Check if this object has LLG or product info
         if (obj.product === 'LLG' && obj.bid) {
             currentPrice = obj.bid;
             lastUpdate = Date.now();
             console.log(`🎯 FOUND LLG at ${path}:`, obj);
             console.log(`💰 LLG Bid: ${obj.bid}, Ask: ${obj.ask || 'N/A'}`);
+            found = true;
             return;
         }
         
+        // Check if any key is 'LLG' or 'llg'
         Object.keys(obj).forEach(key => {
             if (key === 'LLG' || key === 'llg') {
                 const value = obj[key];
@@ -132,6 +166,7 @@ function findLLGPrice(data) {
                         lastUpdate = Date.now();
                         console.log(`🎯 FOUND LLG at ${path}.${key}:`, value);
                         console.log(`💰 LLG Bid: ${value.bid}, Ask: ${value.ask || 'N/A'}`);
+                        found = true;
                     }
                 }
             }
@@ -151,8 +186,10 @@ function findLLGPrice(data) {
     };
     
     searchLLG(data);
+    return found;
 }
 
+// Keep connection alive with regular pings
 setInterval(() => {
     if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
         wsConnection.send('2');
