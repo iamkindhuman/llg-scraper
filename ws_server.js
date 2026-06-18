@@ -1,6 +1,6 @@
 const express = require('express');
 const http = require('http');
-const { io } = require('socket.io-client');
+const io = require('socket.io-client');
 
 // Store latest data
 let latestData = {
@@ -12,6 +12,7 @@ let latestData = {
 let messageCount = 0;
 let isConnected = false;
 let lastUpdateTime = null;
+let socket = null;
 
 // Create Express app
 const app = express();
@@ -24,26 +25,28 @@ app.use((req, res, next) => {
   next();
 });
 
-// Connect to WF Gold WebSocket using socket.io-client
+// Connect to WF Gold WebSocket using socket.io-client v2
 function connectToWFGold() {
   console.log(`[${new Date().toISOString()}] 🔌 Connecting to WF Gold...`);
   
-  const socket = io('wss://quote.wfgold.com:8082', {
+  // Socket.IO v2 connection options
+  const options = {
     transports: ['websocket'],
-    query: {
-      token: 'applepieapplepieapplepieapplepie'
-    },
+    query: 'token=applepieapplepieapplepieapplepie',
     extraHeaders: {
       'Origin': 'https://www.wfgold.com',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     },
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 5000,
     reconnectionDelayMax: 30000,
     timeout: 20000,
+    forceNew: true,
     rejectUnauthorized: false
-  });
+  };
+  
+  socket = io.connect('https://quote.wfgold.com:8082', options);
 
   socket.on('connect', () => {
     console.log(`[${new Date().toISOString()}] ✅ Connected! Socket ID: ${socket.id}`);
@@ -78,8 +81,8 @@ function connectToWFGold() {
       
       latestData.timestamp = lastUpdateTime;
       
-      // Log key products every 10 updates
-      if (messageCount % 10 === 0) {
+      // Log updates periodically
+      if (messageCount === 1 || messageCount % 50 === 0) {
         console.log(`\n[${lastUpdateTime}] 📊 Update #${messageCount}`);
         logKeyProducts();
       }
@@ -89,6 +92,8 @@ function connectToWFGold() {
   socket.on('disconnect', (reason) => {
     console.log(`[${new Date().toISOString()}] 🔴 Disconnected: ${reason}`);
     isConnected = false;
+    
+    // Socket.IO v2 will auto-reconnect
   });
 
   socket.on('connect_error', (error) => {
@@ -100,11 +105,13 @@ function connectToWFGold() {
     console.error(`[${new Date().toISOString()}] ❌ Error: ${error}`);
   });
 
-  // Log first connection and first data
-  socket.on('quote.realtime', function firstData(data) {
-    console.log(`[${new Date().toISOString()}] 📡 First data received!`);
-    logKeyProducts();
-    socket.off('quote.realtime', firstData);
+  socket.on('reconnect_attempt', (attemptNumber) => {
+    console.log(`[${new Date().toISOString()}] 🔄 Reconnect attempt #${attemptNumber}`);
+  });
+
+  socket.on('reconnect', () => {
+    console.log(`[${new Date().toISOString()}] ✅ Reconnected!`);
+    isConnected = true;
   });
 
   return socket;
@@ -126,8 +133,7 @@ function logKeyProducts() {
 // Routes
 app.get('/', (req, res) => {
   res.json({
-    service: 'WF Gold Scraper',
-    version: '2.0.0',
+    service: 'WF Gold Scraper v2.0',
     status: {
       connected: isConnected,
       messageCount,
@@ -186,7 +192,8 @@ app.get('/api/status', (req, res) => {
     connected: isConnected,
     messageCount,
     lastUpdate: latestData.timestamp,
-    products: Object.keys(latestData.products).length
+    products: Object.keys(latestData.products).length,
+    socketId: socket ? socket.id : null
   });
 });
 
@@ -202,10 +209,10 @@ app.get('/health', (req, res) => {
 // Start server
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`\n🚀 WF Gold Scraper v2.0`);
+  console.log(`\n🚀 WF Gold Scraper v2.0 (Socket.IO v2 client)`);
   console.log(`📡 Port: ${PORT}`);
   console.log(`🌐 URL: https://llg-scraper.onrender.com`);
-  console.log(`\n⏳ Connecting to WebSocket in 2 seconds...\n`);
+  console.log(`\n⏳ Connecting in 2 seconds...\n`);
   
   // Connect after server is ready
   setTimeout(() => {
@@ -216,10 +223,12 @@ server.listen(PORT, () => {
 // Handle shutdown
 process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down...');
+  if (socket) socket.close();
   server.close(() => process.exit(0));
 });
 
 process.on('SIGTERM', () => {
   console.log('\n🛑 Shutting down...');
+  if (socket) socket.close();
   server.close(() => process.exit(0));
 });
