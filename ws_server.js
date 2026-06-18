@@ -18,8 +18,7 @@ app.get('/', (req, res) => {
         message: 'LLG Scraper is running',
         endpoints: {
             llg: '/api/llg',
-            messages: '/api/messages',
-            raw: '/api/raw'
+            messages: '/api/messages'
         }
     });
 });
@@ -27,15 +26,14 @@ app.get('/', (req, res) => {
 function connectWebSocket() {
     console.log('🔄 Connecting to WebSocket...');
     
-    // Try without token first
-    const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?EIO=3&transport=websocket', {
+    // Use the token-based WebSocket connection
+    const ws = new WebSocket('wss://quote.wfgold.com:8082/socket.io/?token=applepieapplepieapplepieapplepie&EIO=3&transport=websocket', {
         rejectUnauthorized: false
     });
     
     ws.on('open', function open() {
         console.log('✅ WebSocket connected!');
         reconnectAttempts = 0;
-        // Just send handshake, no subscription
         ws.send('40');
         console.log('📤 Sent Socket.IO handshake (40)');
     });
@@ -66,29 +64,28 @@ function connectWebSocket() {
                 return;
             }
             
-            // Parse any JSON data
+            // Parse Socket.IO events
             if (message.startsWith('42')) {
                 try {
-                    const jsonStr = message.substring(2);
-                    const parsed = JSON.parse(jsonStr);
-                    console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
+                    // Handle the specific format: 42/bquote,["quote.realtime",{...}]
+                    let parsed;
+                    let jsonStr = message.substring(2);
                     
-                    // Look for any numbers that could be prices
-                    const found = findAnyPrice(parsed);
-                    if (found) {
-                        console.log('🎯 POTENTIAL PRICE FOUND!');
+                    // Check if it's the bquote format
+                    if (jsonStr.startsWith('/bquote,')) {
+                        jsonStr = jsonStr.substring(8); // Remove '/bquote,'
+                        parsed = JSON.parse(jsonStr);
+                        console.log('📊 BQUOTE DATA:', JSON.stringify(parsed, null, 2));
+                    } else {
+                        parsed = JSON.parse(jsonStr);
+                        console.log('📊 PARSED DATA:', JSON.stringify(parsed, null, 2));
                     }
+                    
+                    // Extract LLG price from the data
+                    extractLLGPrice(parsed);
+                    
                 } catch (e) {
                     console.log('⚠️ Could not parse JSON:', e.message);
-                }
-            }
-            
-            // If it's a plain number, it might be a price
-            if (/^\d+\.\d+$/.test(message)) {
-                console.log('💰 POSSIBLE PRICE:', message);
-                if (!currentPrice) {
-                    currentPrice = message;
-                    lastUpdate = Date.now();
                 }
             }
             
@@ -124,65 +121,49 @@ function getMessageType(message) {
     if (message.startsWith('0')) return 'handshake';
     if (message.startsWith('42')) return 'event';
     if (message.startsWith('2')) return 'ping';
-    if (/^\d+\.\d+$/.test(message)) return 'possible-price';
     return 'unknown';
 }
 
-function findAnyPrice(data) {
-    let found = false;
-    const searchForNumbers = (obj, path = '') => {
+function extractLLGPrice(data) {
+    // Look for the quote.realtime data structure
+    if (Array.isArray(data) && data[0] === 'quote.realtime') {
+        const quoteData = data[1];
+        if (quoteData && quoteData.products) {
+            // XAU= is the LLG product
+            if (quoteData.products['XAU=']) {
+                const price = quoteData.products['XAU='].buy;
+                if (price && !isNaN(parseFloat(price))) {
+                    currentPrice = price;
+                    lastUpdate = Date.now();
+                    console.log(`💰 LLG Price updated: ${currentPrice}`);
+                }
+            }
+        }
+    }
+    
+    // Also search recursively for any XAU= data
+    const searchForXAU = (obj) => {
         if (!obj || typeof obj !== 'object') return;
         
-        // If it's an array, check each item
-        if (Array.isArray(obj)) {
-            obj.forEach((item, index) => {
-                if (typeof item === 'object' && item !== null) {
-                    searchForNumbers(item, `${path}[${index}]`);
-                } else if (typeof item === 'string' && /^\d+\.\d+$/.test(item)) {
-                    console.log(`💰 Found number at ${path}[${index}]:`, item);
-                    if (!currentPrice) {
-                        currentPrice = item;
-                        lastUpdate = Date.now();
-                    }
-                    found = true;
-                }
-            });
-            return;
+        // Check if this object has XAU=
+        if (obj['XAU=']) {
+            const price = obj['XAU='].buy;
+            if (price && !isNaN(parseFloat(price))) {
+                currentPrice = price;
+                lastUpdate = Date.now();
+                console.log(`💰 LLG Price found: ${currentPrice}`);
+            }
         }
         
-        // Check all keys
-        Object.keys(obj).forEach(key => {
-            const value = obj[key];
-            
-            // Check if value is a number string
-            if (typeof value === 'string' && /^\d+\.\d+$/.test(value)) {
-                console.log(`💰 Found number at ${path}.${key}:`, value);
-                if (!currentPrice) {
-                    currentPrice = value;
-                    lastUpdate = Date.now();
-                }
-                found = true;
-            }
-            
-            // Check if value is a number
-            if (typeof value === 'number' && value > 0) {
-                console.log(`💰 Found number at ${path}.${key}:`, value);
-                if (!currentPrice) {
-                    currentPrice = value.toString();
-                    lastUpdate = Date.now();
-                }
-                found = true;
-            }
-            
-            // Recursively search
+        // Recursively search
+        Object.values(obj).forEach(value => {
             if (typeof value === 'object' && value !== null) {
-                searchForNumbers(value, `${path}.${key}`);
+                searchForXAU(value);
             }
         });
     };
     
-    searchForNumbers(data);
-    return found;
+    searchForXAU(data);
 }
 
 // Keep connection alive
@@ -196,14 +177,8 @@ setInterval(() => {
 app.get('/api/messages', (req, res) => {
     res.json({
         total: allMessages.length,
-        messages: allMessages
+        messages: allMessages.slice(-50) // Return last 50 messages
     });
-});
-
-app.get('/api/raw', (req, res) => {
-    // Return only the raw messages as text
-    const raw = allMessages.map(m => m.raw).join('\n');
-    res.type('text/plain').send(raw);
 });
 
 app.get('/api/llg', (req, res) => {
@@ -213,14 +188,14 @@ app.get('/api/llg', (req, res) => {
             timestamp: lastUpdate,
             source: 'websocket',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
-            totalMessages: allMessages.length
+            product: 'LLG'
         });
     } else {
         res.status(503).json({
             error: 'No price data available yet',
             connected: wsConnection && wsConnection.readyState === WebSocket.OPEN,
             messagesReceived: allMessages.length,
-            raw: allMessages.slice(-10).map(m => m.raw) // Show last 10 messages
+            lastMessages: allMessages.slice(-5).map(m => m.raw)
         });
     }
 });
