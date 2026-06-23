@@ -28,7 +28,7 @@ let latestData = {
 // USD/MYR rate cache
 let cachedUsdMyr = null;
 let lastUsdMyrFetch = 0;
-const USDMYR_CACHE_DURATION = 5000;
+const USDMYR_CACHE_DURATION = 2000; // Reduced to 2 seconds for faster updates
 
 // Known hash from msgold.com.my
 const AJAX_HASH = 'c7345ad4580290c2971b1a5b43b0db0a';
@@ -78,11 +78,22 @@ async function extractPrefix() {
         
         const html = response.data;
         
-        const match = html.match(/ajax\("refg4","(\d+)_"\+s\+"_([a-f0-9]+)"/);
+        // Try multiple patterns to find the prefix
+        let match = html.match(/ajax\("refg4","(\d+)_"\+s\+"_([a-f0-9]+)"/);
+        
+        if (!match) {
+            // Alternative pattern
+            match = html.match(/"(\d+)_"\s*\+\s*s\s*\+\s*"_([a-f0-9]+)"/);
+        }
+        
+        if (!match) {
+            // Another alternative
+            match = html.match(/ajax\([^,]+,[^,]*"(\d+)_/);
+        }
         
         if (match) {
             const prefix = match[1];
-            const hash = match[2];
+            const hash = match[2] || AJAX_HASH;
             console.log('✅ Found prefix:', prefix, 'hash:', hash);
             return { prefix, hash };
         }
@@ -110,18 +121,20 @@ async function fetchUsdMyr() {
     try {
         const now = Date.now();
         
-        // Return cached rate if fresh enough
-        if (cachedUsdMyr && (now - lastUsdMyrFetch) < USDMYR_CACHE_DURATION) {
-            return cachedUsdMyr;
-        }
+        console.log('💱 Attempting to fetch USD/MYR rate...');
         
-        console.log('💱 Fetching USD/MYR rate from msgold.com.my...');
+        // Force refresh URL every 5 minutes
+        if (!cachedAjaxUrl || (now - lastUsdMyrFetch) > 300000) {
+            console.log('🔄 Refreshing AJAX URL...');
+            cachedAjaxUrl = null; // Reset to force new extraction
+        }
         
         // Get fresh prefix if needed
         if (!cachedAjaxUrl) {
             const params = await extractPrefix();
             if (params) {
                 cachedAjaxUrl = generateAjaxUrl(params.prefix, params.hash || AJAX_HASH);
+                console.log('📎 Generated URL:', cachedAjaxUrl);
             } else {
                 // Fallback: try common prefixes
                 for (let testPrefix of ['3581', '794', '1360', '2104']) {
@@ -144,6 +157,7 @@ async function fetchUsdMyr() {
                             break;
                         }
                     } catch (e) {
+                        console.log('❌ Prefix', testPrefix, 'failed:', e.message);
                         continue;
                     }
                 }
@@ -163,24 +177,45 @@ async function fetchUsdMyr() {
             
             const data = response.data;
             
-            // Extract spn1 (USD/MYR rate)
-            const spn1Match = data.match(/updprc\('spn1','([\d,]+\.?\d*)'\)/);
+            // Extract spn1 (USD/MYR rate) - try multiple patterns
+            let spn1 = null;
             
+            // Pattern 1: updprc('spn1','XXX.XX')
+            const spn1Match = data.match(/updprc\('spn1','([\d,]+\.?\d*)'\)/);
             if (spn1Match) {
-                const spn1 = parseFloat(spn1Match[1].replace(/,/g, ''));
-                console.log('✅ USD/MYR rate (spn1):', spn1);
+                spn1 = parseFloat(spn1Match[1].replace(/,/g, ''));
+            }
+            
+            // Pattern 2: Look for any number near "USD" or "MYR"
+            if (!spn1) {
+                const usdMatch = data.match(/USD[^0-9]*([\d]+\.[\d]+)/);
+                if (usdMatch) {
+                    spn1 = parseFloat(usdMatch[1]);
+                }
+            }
+            
+            if (spn1 && !isNaN(spn1)) {
+                console.log('✅ USD/MYR rate (spn1):', spn1, '(previous:', cachedUsdMyr, ')');
+                
+                // Update only if value actually changed
+                if (cachedUsdMyr !== spn1) {
+                    console.log('📊 USD/MYR updated from', cachedUsdMyr, 'to', spn1);
+                }
                 
                 cachedUsdMyr = spn1;
                 lastUsdMyrFetch = now;
                 latestData.usdmyr = spn1;
                 
                 return spn1;
+            } else {
+                console.log('⚠️ spn1 not found in response. Response preview:', data.substring(0, 200));
             }
-            
-            console.log('⚠️ spn1 not found in response');
+        } else {
+            console.log('❌ No cached URL available');
         }
         
         // If all fails, return last cached value
+        console.log('⚠️ Returning cached value:', cachedUsdMyr);
         return cachedUsdMyr;
         
     } catch (error) {
@@ -297,8 +332,13 @@ function connect() {
 // Start connection
 let ws = connect();
 
-// Start USD/MYR fetching interval
-setInterval(fetchUsdMyr, 5000);
+// Start USD/MYR fetching interval - more frequent updates
+setInterval(() => {
+    console.log('⏰ Fetch interval triggered');
+    fetchUsdMyr();
+}, 3000); // Every 3 seconds instead of 5
+
+// Initial fetch
 fetchUsdMyr();
 
 // API endpoints
@@ -336,7 +376,9 @@ app.get("/health", (req, res) => {
         status: connected ? "ok" : "error",
         uptime: process.uptime(),
         memory: process.memoryUsage().heapUsed / 1024 / 1024,
-        usdmyr: latestData.usdmyr
+        usdmyr: latestData.usdmyr,
+        usdmyr_cached: cachedUsdMyr,
+        last_usdmyr_fetch: lastUsdMyrFetch ? new Date(lastUsdMyrFetch).toISOString() : 'never'
     });
 });
 
