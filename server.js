@@ -1,9 +1,17 @@
 const express = require("express");
 const WebSocket = require("ws");
-const axios = require("axios");
+const https = require("https");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Add CORS middleware
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
+});
 
 // In-memory storage only - NO disk writes, NO database
 let connected = false;
@@ -13,37 +21,63 @@ let latestData = {
     eur: null,
     gbp: null,
     jpy: null,
-    usdmyr: null, // Added for USD/MYR rate
+    usdmyr: null,
     timestamp: null
 };
 
 // USD/MYR rate cache
 let cachedUsdMyr = null;
 let lastUsdMyrFetch = 0;
-const USDMYR_CACHE_DURATION = 5000; // 5 seconds
+const USDMYR_CACHE_DURATION = 5000;
 
 // Known hash from msgold.com.my
 const AJAX_HASH = 'c7345ad4580290c2971b1a5b43b0db0a';
 let cachedAjaxUrl = null;
+
+// Helper function for HTTPS requests
+function httpsGet(url, options = {}) {
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, { 
+            ...options,
+            timeout: options.timeout || 15000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                ...options.headers
+            }
+        }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                resolve({
+                    status: res.statusCode,
+                    data: data
+                });
+            });
+        });
+        
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request timeout'));
+        });
+    });
+}
 
 // Function to extract prefix from msgold.com.my
 async function extractPrefix() {
     try {
         console.log('🔍 Extracting prefix from msgold.com.my...');
         
-        const response = await axios.get('https://msgold.com.my/', {
+        const response = await httpsGet('https://msgold.com.my/', {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9',
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Cache-Control': 'no-cache'
-            },
-            timeout: 15000
+            }
         });
         
         const html = response.data;
         
-        // Look for: ajax("refg4","PREFIX_"+s+"_HASH","eval","","");
         const match = html.match(/ajax\("refg4","(\d+)_"\+s\+"_([a-f0-9]+)"/);
         
         if (match) {
@@ -95,20 +129,16 @@ async function fetchUsdMyr() {
                     console.log('🔄 Testing prefix:', testPrefix);
                     
                     try {
-                        const response = await axios.get(`https://msgold.com.my/${testUrl}`, {
+                        const response = await httpsGet(`https://msgold.com.my/${testUrl}`, {
+                            timeout: 10000,
                             headers: {
-                                'User-Agent': 'Mozilla/5.0',
                                 'X-Requested-With': 'XMLHttpRequest',
                                 'Referer': 'https://msgold.com.my/',
                                 'Cache-Control': 'no-cache'
-                            },
-                            timeout: 10000
+                            }
                         });
                         
-                        const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-                        
-                        // Check if we got valid data
-                        if (data.includes('updprc')) {
+                        if (response.data.includes('updprc')) {
                             cachedAjaxUrl = testUrl;
                             console.log('✅ Working prefix found:', testPrefix);
                             break;
@@ -122,17 +152,16 @@ async function fetchUsdMyr() {
         
         // Fetch with cached URL
         if (cachedAjaxUrl) {
-            const response = await axios.get(`https://msgold.com.my/${cachedAjaxUrl}`, {
+            const response = await httpsGet(`https://msgold.com.my/${cachedAjaxUrl}`, {
+                timeout: 10000,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0',
                     'X-Requested-With': 'XMLHttpRequest',
                     'Referer': 'https://msgold.com.my/',
                     'Cache-Control': 'no-cache'
-                },
-                timeout: 10000
+                }
             });
             
-            const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+            const data = response.data;
             
             // Extract spn1 (USD/MYR rate)
             const spn1Match = data.match(/updprc\('spn1','([\d,]+\.?\d*)'\)/);
@@ -156,7 +185,7 @@ async function fetchUsdMyr() {
         
     } catch (error) {
         console.error('❌ Error fetching USD/MYR:', error.message);
-        return cachedUsdMyr; // Return last known value
+        return cachedUsdMyr;
     }
 }
 
@@ -269,8 +298,8 @@ function connect() {
 let ws = connect();
 
 // Start USD/MYR fetching interval
-setInterval(fetchUsdMyr, 5000); // Fetch every 5 seconds
-fetchUsdMyr(); // Initial fetch
+setInterval(fetchUsdMyr, 5000);
+fetchUsdMyr();
 
 // API endpoints
 app.get("/", (req, res) => {
@@ -294,7 +323,6 @@ app.get("/all", (req, res) => {
     res.json(latestData);
 });
 
-// New endpoint for USD/MYR rate
 app.get("/usdmyr", (req, res) => {
     res.json({
         rate: latestData.usdmyr,
@@ -312,7 +340,6 @@ app.get("/health", (req, res) => {
     });
 });
 
-// Cleanup on shutdown
 process.on('SIGTERM', () => {
     console.log('Shutting down...');
     if (ws) ws.terminate();
