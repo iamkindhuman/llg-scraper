@@ -177,38 +177,38 @@ async function fetchUsdMyr() {
             
             const data = response.data;
             
-            // Extract spn1 (USD/MYR rate) - try multiple patterns
-            let spn1 = null;
+            // Extract spn2 (USD/MYR rate) - try multiple patterns
+            let spn2 = null;
             
-            // Pattern 1: updprc('spn1','XXX.XX')
-            const spn1Match = data.match(/updprc\('spn1','([\d,]+\.?\d*)'\)/);
-            if (spn1Match) {
-                spn1 = parseFloat(spn1Match[1].replace(/,/g, ''));
+            // Pattern 1: updprc('spn2','XXX.XX')
+            const spn2Match = data.match(/updprc\('spn2','([\d,]+\.?\d*)'\)/);
+            if (spn2Match) {
+                spn2 = parseFloat(spn2Match[1].replace(/,/g, ''));
             }
             
             // Pattern 2: Look for any number near "USD" or "MYR"
-            if (!spn1) {
+            if (!spn2) {
                 const usdMatch = data.match(/USD[^0-9]*([\d]+\.[\d]+)/);
                 if (usdMatch) {
-                    spn1 = parseFloat(usdMatch[1]);
+                    spn2 = parseFloat(usdMatch[1]);
                 }
             }
             
-            if (spn1 && !isNaN(spn1)) {
-                console.log('✅ USD/MYR rate (spn1):', spn1, '(previous:', cachedUsdMyr, ')');
+            if (spn2 && !isNaN(spn2)) {
+                console.log('✅ USD/MYR rate (spn2):', spn2, '(previous:', cachedUsdMyr, ')');
                 
                 // Update only if value actually changed
-                if (cachedUsdMyr !== spn1) {
-                    console.log('📊 USD/MYR updated from', cachedUsdMyr, 'to', spn1);
+                if (cachedUsdMyr !== spn2) {
+                    console.log('📊 USD/MYR updated from', cachedUsdMyr, 'to', spn2);
                 }
                 
-                cachedUsdMyr = spn1;
+                cachedUsdMyr = spn2;
                 lastUsdMyrFetch = now;
-                latestData.usdmyr = spn1;
+                latestData.usdmyr = spn2;
                 
-                return spn1;
+                return spn2;
             } else {
-                console.log('⚠️ spn1 not found in response. Response preview:', data.substring(0, 200));
+                console.log('⚠️ spn2 not found in response. Response preview:', data.substring(0, 200));
             }
         } else {
             console.log('❌ No cached URL available');
